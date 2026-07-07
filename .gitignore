@@ -1,0 +1,11 @@
+.work/
+target/
+.idea/
+.vscode/
+*.iml
+*.log
+*.tmp
+*.swp
+Thumbs.db
+Desktop.ini
+.DS_Store
