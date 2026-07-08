@@ -43,6 +43,7 @@ import java.awt.Container;
 import java.awt.Dimension;
 import java.awt.Graphics;
 import java.awt.Graphics2D;
+import java.awt.FlowLayout;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
 import java.awt.Insets;
@@ -50,6 +51,12 @@ import java.awt.LayoutManager2;
 import java.awt.RenderingHints;
 import java.awt.Toolkit;
 import java.awt.Window;
+import java.awt.event.FocusAdapter;
+import java.awt.event.FocusEvent;
+import java.awt.event.KeyAdapter;
+import java.awt.event.KeyEvent;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
 import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
 import java.awt.datatransfer.StringSelection;
@@ -77,6 +84,7 @@ public final class SearchPlusDialog extends JFrame {
     private static final double RESULTS_TABLE_INITIAL_RATIO = 0.56;
     private static final int RESULTS_TABLE_MIN_HEIGHT = 180;
     private static final int PREVIEW_MIN_HEIGHT = 320;
+    private static final String PLUS_TAB_TITLE = "+";
     private static final List<MimeCategory> VISIBLE_MIME_CATEGORIES = List.of(
             MimeCategory.HTML,
             MimeCategory.JAVASCRIPT,
@@ -92,6 +100,8 @@ public final class SearchPlusDialog extends JFrame {
     private final RepeaterCache repeaterCache;
     private final Predicate<List<HttpRequestResponse>> extractHandler;
     private final SearchEngine searchEngine = new SearchEngine();
+    private final JPanel searchTabs = new JPanel(new WrapFlowLayout(FlowLayout.LEFT, 4, 2));
+    private final List<SearchPlusTabState> tabStates = new ArrayList<>();
     private final JTextField queryField = new JTextField(24);
     private final JComboBox<SearchMode> modeCombo = new JComboBox<>(SearchMode.values());
     private final JToggleButton regexCheck = textToggleButton(".*", "Regex");
@@ -137,6 +147,9 @@ public final class SearchPlusDialog extends JFrame {
     private List<SearchResult> allResults = List.of();
     private String activeNegativeFilter = "";
     private SwingWorker<Void, SearchResult> currentWorker;
+    private int activeTabIndex = -1;
+    private int nextTabNumber = 1;
+    private boolean restoringTabState;
 
     private SearchPlusDialog(
             Window locationOwner,
@@ -157,6 +170,7 @@ public final class SearchPlusDialog extends JFrame {
         this.responseEditor = api.userInterface().createHttpResponseEditor(EditorOptions.READ_ONLY);
 
         initializeMimeChecks();
+        initializeSearchTabs();
         configureShrinkableTextFields();
         setDefaultCloseOperation(DISPOSE_ON_CLOSE);
         setLayout(new BorderLayout(8, 8));
@@ -213,6 +227,7 @@ public final class SearchPlusDialog extends JFrame {
             dialog.setVisible(true);
             dialog.toFront();
             dialog.requestFocus();
+            dialog.focusSearchFieldLater();
         });
     }
 
@@ -239,8 +254,372 @@ public final class SearchPlusDialog extends JFrame {
     private JPanel topPanel() {
         JPanel panel = new JPanel(new BorderLayout(8, 6));
         panel.setBorder(BorderFactory.createEmptyBorder(8, 10, 0, 10));
+        panel.add(tabBarPanel(), BorderLayout.NORTH);
         panel.add(controlGridPanel(), BorderLayout.CENTER);
         return panel;
+    }
+
+    private JPanel tabBarPanel() {
+        searchTabs.setOpaque(false);
+        searchTabs.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mousePressed(MouseEvent event) {
+                maybeShowTabMenu(event);
+            }
+
+            @Override
+            public void mouseReleased(MouseEvent event) {
+                maybeShowTabMenu(event);
+            }
+        });
+
+        JPanel panel = new JPanel(new BorderLayout(6, 0));
+        panel.add(searchTabs, BorderLayout.CENTER);
+        return panel;
+    }
+
+    private void initializeSearchTabs() {
+        SearchPlusTabState state = SearchPlusTabState.initial(nextTabNumber++);
+        captureCurrentUiState(state);
+        tabStates.add(state);
+        activeTabIndex = 0;
+        refreshTabBar();
+    }
+
+    private void createSearchTab() {
+        saveActiveTabState();
+        cancelRunningSearch();
+        SearchPlusTabState state = SearchPlusTabState.initial(nextTabNumber++);
+        tabStates.add(state);
+        int index = tabStates.size() - 1;
+        activeTabIndex = index;
+        refreshTabBar();
+        restoreTabState(state);
+        focusSearchFieldLater();
+    }
+
+    private void selectSearchTab(int index) {
+        if (!isRealTabIndex(index) || index == activeTabIndex) {
+            return;
+        }
+        saveActiveTabState();
+        cancelRunningSearch();
+        activeTabIndex = index;
+        refreshTabBar();
+        restoreTabState(tabStates.get(index));
+        focusSearchFieldLater();
+    }
+
+    private void closeTabAt(int index) {
+        if (!isRealTabIndex(index)) {
+            return;
+        }
+        if (tabStates.size() == 1) {
+            cancelRunningSearch();
+            SearchPlusTabState resetState = SearchPlusTabState.initial(1);
+            tabStates.set(0, resetState);
+            activeTabIndex = 0;
+            refreshTabBar();
+            restoreTabState(resetState);
+            focusSearchFieldLater();
+            return;
+        }
+
+        if (index == activeTabIndex) {
+            cancelRunningSearch();
+        } else {
+            saveActiveTabState();
+        }
+
+        tabStates.remove(index);
+        refreshTabBar();
+
+        if (index < activeTabIndex) {
+            activeTabIndex--;
+            refreshTabBar();
+            return;
+        }
+        if (index == activeTabIndex) {
+            activeTabIndex = -1;
+            int nextIndex = Math.min(index, tabStates.size() - 1);
+            selectSearchTab(nextIndex);
+        }
+    }
+
+    private void maybeShowTabMenu(MouseEvent event) {
+        if (!event.isPopupTrigger()) {
+            return;
+        }
+        JPopupMenu menu = new JPopupMenu();
+        JMenuItem newItem = new JMenuItem("New");
+        newItem.addActionListener(action -> createSearchTab());
+        menu.add(newItem);
+        menu.show(searchTabs, event.getX(), event.getY());
+    }
+
+    private void refreshTabBar() {
+        searchTabs.removeAll();
+        for (int index = 0; index < tabStates.size(); index++) {
+            searchTabs.add(tabComponent(index));
+        }
+        searchTabs.add(plusTabComponent());
+        searchTabs.revalidate();
+        searchTabs.repaint();
+    }
+
+    private boolean isRealTabIndex(int index) {
+        return index >= 0 && index < tabStates.size();
+    }
+
+    private JPanel plusTabComponent() {
+        JPanel panel = new JPanel(new FlowLayout(FlowLayout.CENTER, 6, 0));
+        panel.setOpaque(true);
+        panel.setBackground(searchTabs.getBackground());
+        JLabel plus = new JLabel(PLUS_TAB_TITLE);
+        plus.setFont(plus.getFont().deriveFont(22f));
+        plus.setHorizontalAlignment(JLabel.CENTER);
+        plus.setPreferredSize(new Dimension(28, 24));
+        plus.setToolTipText("New search tab");
+        plus.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mouseClicked(MouseEvent event) {
+                if (SwingUtilities.isLeftMouseButton(event)) {
+                    createSearchTab();
+                }
+            }
+        });
+        panel.add(plus);
+        return panel;
+    }
+
+    private JPanel tabComponent(int index) {
+        SearchPlusTabState state = tabStates.get(index);
+
+        JPanel panel = new JPanel(new FlowLayout(FlowLayout.CENTER, 4, 0));
+        panel.setOpaque(true);
+        panel.setBackground(index == activeTabIndex ? new Color(232, 240, 254) : searchTabs.getBackground());
+        panel.setBorder(BorderFactory.createLineBorder(index == activeTabIndex ? new Color(100, 140, 220) : new Color(210, 210, 210)));
+        panel.setToolTipText("Search tab " + state.title);
+        panel.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mouseClicked(MouseEvent event) {
+                if (SwingUtilities.isLeftMouseButton(event)) {
+                    int tabIndex = tabStates.indexOf(state);
+                    if (event.getClickCount() == 2) {
+                        startInlineRename(tabIndex);
+                    } else {
+                        selectSearchTab(tabIndex);
+                    }
+                }
+            }
+
+            @Override
+            public void mousePressed(MouseEvent event) {
+                maybeShowTabMenu(event, tabStates.indexOf(state));
+            }
+
+            @Override
+            public void mouseReleased(MouseEvent event) {
+                maybeShowTabMenu(event, tabStates.indexOf(state));
+            }
+        });
+        JLabel label = new JLabel(state.title);
+        label.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mouseClicked(MouseEvent event) {
+                if (SwingUtilities.isLeftMouseButton(event)) {
+                    int tabIndex = tabStates.indexOf(state);
+                    if (event.getClickCount() == 2) {
+                        startInlineRename(tabIndex);
+                    } else {
+                        selectSearchTab(tabIndex);
+                    }
+                }
+            }
+        });
+        JButton close = new JButton("x");
+        close.setFocusable(false);
+        close.setMargin(new Insets(0, 3, 0, 3));
+        close.setToolTipText("Close search tab");
+        close.addActionListener(event -> closeTabAt(tabStates.indexOf(state)));
+        panel.add(label);
+        panel.add(close);
+        return panel;
+    }
+
+    private void maybeShowTabMenu(MouseEvent event, int index) {
+        if (!event.isPopupTrigger() || !isRealTabIndex(index)) {
+            return;
+        }
+        selectSearchTab(index);
+        JPopupMenu menu = new JPopupMenu();
+        JMenuItem renameItem = new JMenuItem("Rename");
+        renameItem.addActionListener(action -> startInlineRename(index));
+        JMenuItem closeItem = new JMenuItem("Close");
+        closeItem.addActionListener(action -> closeTabAt(index));
+        menu.add(renameItem);
+        menu.add(closeItem);
+        menu.show((Component) event.getSource(), event.getX(), event.getY());
+    }
+
+    private void startInlineRename(int index) {
+        if (!isRealTabIndex(index)) {
+            return;
+        }
+        SearchPlusTabState state = tabStates.get(index);
+        JTextField editor = new JTextField(state.title);
+        editor.setColumns(Math.max(3, state.title.length() + 1));
+        final boolean[] finished = {false};
+
+        Runnable commit = () -> {
+            if (finished[0]) {
+                return;
+            }
+            finished[0] = true;
+            try {
+                state.rename(editor.getText());
+            } catch (IllegalArgumentException exception) {
+                JOptionPane.showMessageDialog(this, exception.getMessage(), "Search++", JOptionPane.ERROR_MESSAGE);
+            }
+            refreshTabBar();
+        };
+        Runnable cancel = () -> {
+            if (finished[0]) {
+                return;
+            }
+            finished[0] = true;
+            refreshTabBar();
+        };
+
+        editor.addActionListener(event -> commit.run());
+        editor.addKeyListener(new KeyAdapter() {
+            @Override
+            public void keyPressed(KeyEvent event) {
+                if (event.getKeyCode() == KeyEvent.VK_ESCAPE) {
+                    cancel.run();
+                }
+            }
+        });
+        editor.addFocusListener(new FocusAdapter() {
+            @Override
+            public void focusLost(FocusEvent event) {
+                commit.run();
+            }
+        });
+
+        searchTabs.remove(index);
+        searchTabs.add(editor, index);
+        searchTabs.revalidate();
+        searchTabs.repaint();
+        SwingUtilities.invokeLater(() -> {
+            editor.requestFocusInWindow();
+            editor.selectAll();
+        });
+    }
+
+    private void saveActiveTabState() {
+        if (restoringTabState || activeTabIndex < 0 || activeTabIndex >= tabStates.size()) {
+            return;
+        }
+        captureCurrentUiState(tabStates.get(activeTabIndex));
+    }
+
+    private void captureCurrentUiState(SearchPlusTabState state) {
+        state.query = queryField.getText();
+        state.mode = (SearchMode) modeCombo.getSelectedItem();
+        state.regex = regexCheck.isSelected();
+        state.caseSensitive = caseCheck.isSelected();
+        state.negativeFilter = negativeFilterField.getText();
+        state.activeNegativeFilter = activeNegativeFilter;
+        state.negativeAuto = negativeAutoCheck.isSelected();
+        state.requestHeaders = requestHeadersCheck.isSelected();
+        state.requestBody = requestBodyCheck.isSelected();
+        state.responseHeaders = responseHeadersCheck.isSelected();
+        state.responseBody = responseBodyCheck.isSelected();
+        state.includeTarget = targetSourceCheck.isSelected();
+        state.includeProxy = proxySourceCheck.isSelected();
+        state.includeRepeater = repeaterSourceCheck.isSelected();
+        state.includeOrganizer = organizerSourceCheck.isSelected();
+        state.status2xx = status2xxCheck.isSelected();
+        state.status3xx = status3xxCheck.isSelected();
+        state.status4xx = status4xxCheck.isSelected();
+        state.status5xx = status5xxCheck.isSelected();
+        state.showExtension = showExtensionCheck.isSelected();
+        state.showExtensionText = showExtensionField.getText();
+        state.hideExtension = hideExtensionCheck.isSelected();
+        state.hideExtensionText = hideExtensionField.getText();
+        state.mimeSelections.clear();
+        for (Map.Entry<MimeCategory, JCheckBox> entry : mimeChecks.entrySet()) {
+            state.mimeSelections.put(entry.getKey(), entry.getValue().isSelected());
+        }
+        state.setResults(allResults, currentResults);
+        state.selectedModelRows = selectedModelRows();
+        state.countText = countLabel.getText();
+    }
+
+    private void restoreTabState(SearchPlusTabState state) {
+        restoringTabState = true;
+        try {
+            queryField.setText(state.query);
+            modeCombo.setSelectedItem(state.mode);
+            regexCheck.setSelected(state.regex);
+            caseCheck.setSelected(state.caseSensitive);
+            negativeFilterField.setText(state.negativeFilter);
+            activeNegativeFilter = state.activeNegativeFilter;
+            negativeAutoCheck.setSelected(state.negativeAuto);
+            requestHeadersCheck.setSelected(state.requestHeaders);
+            requestBodyCheck.setSelected(state.requestBody);
+            responseHeadersCheck.setSelected(state.responseHeaders);
+            responseBodyCheck.setSelected(state.responseBody);
+            targetSourceCheck.setSelected(state.includeTarget);
+            proxySourceCheck.setSelected(state.includeProxy);
+            repeaterSourceCheck.setSelected(state.includeRepeater);
+            organizerSourceCheck.setSelected(state.includeOrganizer);
+            status2xxCheck.setSelected(state.status2xx);
+            status3xxCheck.setSelected(state.status3xx);
+            status4xxCheck.setSelected(state.status4xx);
+            status5xxCheck.setSelected(state.status5xx);
+            showExtensionCheck.setSelected(state.showExtension);
+            showExtensionField.setText(state.showExtensionText);
+            hideExtensionCheck.setSelected(state.hideExtension);
+            hideExtensionField.setText(state.hideExtensionText);
+            for (Map.Entry<MimeCategory, JCheckBox> entry : mimeChecks.entrySet()) {
+                entry.getValue().setSelected(state.mimeSelections.getOrDefault(entry.getKey(), false));
+            }
+            syncExtensionFields();
+            replaceResults(state.currentResults, state.selectedModelRows);
+            allResults = new ArrayList<>(state.allResults);
+            countLabel.setText(state.countText);
+            applyPreviewSearchExpression();
+        } finally {
+            restoringTabState = false;
+        }
+    }
+
+    private int[] selectedModelRows() {
+        int[] selectedRows = table.getSelectedRows();
+        int[] modelRows = new int[selectedRows.length];
+        for (int index = 0; index < selectedRows.length; index++) {
+            modelRows[index] = table.convertRowIndexToModel(selectedRows[index]);
+        }
+        return modelRows;
+    }
+
+    private void restoreSelectedRows(int[] modelRows) {
+        table.clearSelection();
+        if (modelRows == null || modelRows.length == 0) {
+            updatePreview();
+            return;
+        }
+        for (int modelRow : modelRows) {
+            if (modelRow >= 0 && modelRow < tableModel.getRowCount()) {
+                int viewRow = table.convertRowIndexToView(modelRow);
+                if (viewRow >= 0) {
+                    table.addRowSelectionInterval(viewRow, viewRow);
+                }
+            }
+        }
+        updatePreview();
     }
 
     private JPanel controlGridPanel() {
@@ -335,6 +714,18 @@ public final class SearchPlusDialog extends JFrame {
         allowHorizontalShrink(hideExtensionField);
     }
 
+    private void focusSearchFieldLater() {
+        SwingUtilities.invokeLater(() -> {
+            queryField.requestFocusInWindow();
+            queryField.selectAll();
+        });
+    }
+
+    private void syncExtensionFields() {
+        showExtensionField.setEnabled(showExtensionCheck.isSelected());
+        hideExtensionField.setEnabled(hideExtensionCheck.isSelected());
+    }
+
     private static void allowHorizontalShrink(JTextField field) {
         Dimension minimum = field.getMinimumSize();
         field.setMinimumSize(new Dimension(0, minimum.height));
@@ -343,8 +734,8 @@ public final class SearchPlusDialog extends JFrame {
     private JPanel locationsPanel() {
         return checkboxGridGroup(
                 "Locations",
-                new JCheckBox[]{requestHeadersCheck, requestBodyCheck},
-                new JCheckBox[]{responseHeadersCheck, responseBodyCheck}
+                new JCheckBox[]{requestHeadersCheck, responseHeadersCheck},
+                new JCheckBox[]{requestBodyCheck, responseBodyCheck}
         );
     }
 
@@ -519,20 +910,20 @@ public final class SearchPlusDialog extends JFrame {
             if (negativeAutoCheck.isSelected()) {
                 applyNegativeFilter();
             }
+            saveActiveTabState();
         });
         negativeFilterField.getDocument().addDocumentListener(negativeFilterDocumentListener());
 
-        showExtensionField.setEnabled(false);
-        hideExtensionField.setEnabled(false);
+        syncExtensionFields();
         showExtensionCheck.addActionListener(event -> {
-            showExtensionField.setEnabled(showExtensionCheck.isSelected());
+            syncExtensionFields();
             if (showExtensionCheck.isSelected()) {
                 showExtensionField.requestFocusInWindow();
             }
             applyCurrentFilters();
         });
         hideExtensionCheck.addActionListener(event -> {
-            hideExtensionField.setEnabled(hideExtensionCheck.isSelected());
+            syncExtensionFields();
             if (hideExtensionCheck.isSelected()) {
                 hideExtensionField.requestFocusInWindow();
             }
@@ -554,17 +945,23 @@ public final class SearchPlusDialog extends JFrame {
         return new DocumentListener() {
             @Override
             public void insertUpdate(DocumentEvent event) {
-                applyCurrentFilters();
+                applyFilterIfNotRestoring();
             }
 
             @Override
             public void removeUpdate(DocumentEvent event) {
-                applyCurrentFilters();
+                applyFilterIfNotRestoring();
             }
 
             @Override
             public void changedUpdate(DocumentEvent event) {
-                applyCurrentFilters();
+                applyFilterIfNotRestoring();
+            }
+
+            private void applyFilterIfNotRestoring() {
+                if (!restoringTabState) {
+                    applyCurrentFilters();
+                }
             }
         };
     }
@@ -587,7 +984,7 @@ public final class SearchPlusDialog extends JFrame {
             }
 
             private void applyIfAuto() {
-                if (negativeAutoCheck.isSelected()) {
+                if (!restoringTabState && negativeAutoCheck.isSelected()) {
                     applyNegativeFilter();
                 }
             }
@@ -595,6 +992,9 @@ public final class SearchPlusDialog extends JFrame {
     }
 
     private void applyNegativeFilter() {
+        if (restoringTabState) {
+            return;
+        }
         activeNegativeFilter = negativeFilterField.getText();
         applyCurrentFilters();
     }
@@ -694,12 +1094,15 @@ public final class SearchPlusDialog extends JFrame {
             return;
         }
 
+        saveActiveTabState();
         cancelRunningSearch();
+        applyPreviewSearchExpression(options);
         tableModel.setRowCount(0);
         allResults = new ArrayList<>();
         currentResults = new ArrayList<>();
         clearPreview();
         countLabel.setText("Searching... 0 results");
+        saveActiveTabState();
 
         SwingWorker<Void, SearchResult> worker = new SwingWorker<>() {
             @Override
@@ -724,6 +1127,7 @@ public final class SearchPlusDialog extends JFrame {
                 if (currentWorker == this) {
                     allResults.addAll(chunks);
                     appendResults(filterResults(chunks));
+                    saveActiveTabState();
                 }
             }
 
@@ -752,6 +1156,7 @@ public final class SearchPlusDialog extends JFrame {
                         clearPreview();
                     }
                     countLabel.setText(currentResults.size() + " results" + (cancelled ? " (cancelled)" : ""));
+                    saveActiveTabState();
                 }
             }
         };
@@ -842,6 +1247,9 @@ public final class SearchPlusDialog extends JFrame {
     }
 
     private void applyCurrentFilters() {
+        if (restoringTabState) {
+            return;
+        }
         tableModel.setRowCount(0);
         currentResults = new ArrayList<>();
         appendResults(filterResults(allResults));
@@ -849,6 +1257,7 @@ public final class SearchPlusDialog extends JFrame {
             clearPreview();
         }
         countLabel.setText(currentResults.size() + " results");
+        saveActiveTabState();
     }
 
     private Set<String> statusPatterns() {
@@ -956,6 +1365,10 @@ public final class SearchPlusDialog extends JFrame {
     }
 
     private void appendResults(List<SearchResult> results) {
+        appendResults(results, true);
+    }
+
+    private void appendResults(List<SearchResult> results, boolean selectFirstResultWhenEmpty) {
         boolean selectFirstResult = currentResults.isEmpty() && table.getSelectedRow() < 0;
         for (SearchResult result : results) {
             currentResults.add(result);
@@ -972,9 +1385,16 @@ public final class SearchPlusDialog extends JFrame {
             });
         }
         countLabel.setText(currentResults.size() + " results");
-        if (selectFirstResult && !currentResults.isEmpty()) {
+        if (selectFirstResultWhenEmpty && selectFirstResult && !currentResults.isEmpty()) {
             table.setRowSelectionInterval(0, 0);
         }
+    }
+
+    private void replaceResults(List<SearchResult> results, int[] selectedModelRows) {
+        tableModel.setRowCount(0);
+        currentResults = new ArrayList<>();
+        appendResults(results == null ? List.of() : results, false);
+        restoreSelectedRows(selectedModelRows);
     }
 
     private void updatePreview() {
@@ -990,8 +1410,10 @@ public final class SearchPlusDialog extends JFrame {
             responseHolder.removeAll();
             if (requestResponse.hasResponse() && requestResponse.response() != null) {
                 responseEditor.setResponse(requestResponse.response());
+                applyPreviewSearchExpression();
                 responseHolder.add(responseEditor.uiComponent(), BorderLayout.CENTER);
             } else {
+                applyPreviewSearchExpression();
                 responseHolder.add(new JLabel("No response."), BorderLayout.CENTER);
             }
             responseHolder.revalidate();
@@ -1002,10 +1424,33 @@ public final class SearchPlusDialog extends JFrame {
     }
 
     private void clearPreview() {
+        applyPreviewSearchExpression();
         responseHolder.removeAll();
         responseHolder.add(new JLabel("No response selected."), BorderLayout.CENTER);
         responseHolder.revalidate();
         responseHolder.repaint();
+    }
+
+    private void applyPreviewSearchExpression() {
+        applyPreviewSearchExpression(buildPreviewSearchExpression());
+    }
+
+    private void applyPreviewSearchExpression(SearchOptions options) {
+        applyPreviewSearchExpression(SearchPlusTabState.previewSearchExpression(options.mode(), options.query()));
+    }
+
+    private String buildPreviewSearchExpression() {
+        return SearchPlusTabState.previewSearchExpression((SearchMode) modeCombo.getSelectedItem(), queryField.getText());
+    }
+
+    private void applyPreviewSearchExpression(String expression) {
+        String safeExpression = expression == null ? "" : expression;
+        try {
+            requestEditor.setSearchExpression(safeExpression);
+            responseEditor.setSearchExpression(safeExpression);
+        } catch (RuntimeException ignored) {
+            // Editor search expression support is best-effort across Burp runtime versions.
+        }
     }
 
     private SearchResult selectedResult() {
@@ -1094,6 +1539,73 @@ public final class SearchPlusDialog extends JFrame {
             if (row < 0 || column < 0 || column >= CONTROL_GRID_COLUMNS || span <= 0 || column + span > CONTROL_GRID_COLUMNS) {
                 throw new IllegalArgumentException("Invalid Search++ control grid cell");
             }
+        }
+    }
+
+    private static final class WrapFlowLayout extends FlowLayout {
+        private WrapFlowLayout(int align, int horizontalGap, int verticalGap) {
+            super(align, horizontalGap, verticalGap);
+        }
+
+        @Override
+        public Dimension preferredLayoutSize(Container target) {
+            return layoutSize(target, false);
+        }
+
+        @Override
+        public Dimension minimumLayoutSize(Container target) {
+            return layoutSize(target, true);
+        }
+
+        private Dimension layoutSize(Container target, boolean minimum) {
+            synchronized (target.getTreeLock()) {
+                Insets insets = target.getInsets();
+                int maxWidth = availableWidth(target, insets);
+                int rowWidth = 0;
+                int rowHeight = 0;
+                int preferredWidth = 0;
+                int preferredHeight = 0;
+                int visibleCount = 0;
+
+                for (Component component : target.getComponents()) {
+                    if (!component.isVisible()) {
+                        continue;
+                    }
+                    Dimension size = minimum ? component.getMinimumSize() : component.getPreferredSize();
+                    int nextRowWidth = rowWidth == 0 ? size.width : rowWidth + getHgap() + size.width;
+                    if (rowWidth > 0 && nextRowWidth > maxWidth) {
+                        preferredWidth = Math.max(preferredWidth, rowWidth);
+                        preferredHeight += rowHeight + getVgap();
+                        rowWidth = size.width;
+                        rowHeight = size.height;
+                    } else {
+                        rowWidth = nextRowWidth;
+                        rowHeight = Math.max(rowHeight, size.height);
+                    }
+                    visibleCount++;
+                }
+
+                if (visibleCount > 0) {
+                    preferredWidth = Math.max(preferredWidth, rowWidth);
+                    preferredHeight += rowHeight;
+                }
+
+                return new Dimension(
+                        preferredWidth + insets.left + insets.right + getHgap() * 2,
+                        preferredHeight + insets.top + insets.bottom + getVgap() * 2
+                );
+            }
+        }
+
+        private int availableWidth(Container target, Insets insets) {
+            int width = target.getWidth();
+            if (width <= 0 && target.getParent() != null) {
+                width = target.getParent().getWidth();
+            }
+            if (width <= 0) {
+                width = CONTROL_GRID_MIN_WIDTH;
+            }
+            return Math.max(1, width - insets.left - insets.right - getHgap() * 2);
         }
     }
 

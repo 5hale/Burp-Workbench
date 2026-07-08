@@ -24,7 +24,7 @@ mvn clean package
 Install this jar in Burp:
 
 ```text
-target\burp-workbench-extension-0.4.0.jar
+target\burp-workbench-extension-0.4.1.jar
 ```
 
 ## Architecture
