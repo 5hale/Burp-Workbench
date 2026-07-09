@@ -14,7 +14,8 @@ public record ExportOptions(
         StatusFilterMode statusFilterMode,
         Set<String> statusPatterns,
         Set<MimeCategory> mimeCategories,
-        Set<String> extensions
+        Set<String> extensions,
+        boolean beautify
 ) {
     public ExportOptions {
         statusFilterMode = statusFilterMode == null ? StatusFilterMode.ALL : statusFilterMode;
@@ -30,9 +31,32 @@ public record ExportOptions(
                 StatusFilterMode.ALL,
                 Set.of(),
                 EnumSet.allOf(MimeCategory.class),
-                Set.of()
+                Set.of(),
+                false
         );
     }
+
+    public ExportOptions(
+            StatusFilterMode statusFilterMode,
+            Set<String> statusPatterns,
+            Set<MimeCategory> mimeCategories,
+            Set<String> extensions
+    ) {
+        this(statusFilterMode, statusPatterns, mimeCategories, extensions, false);
+    }
+
+    public ExportOptions withSaveBeautifiedJavascriptCopy(boolean enabled) {
+        return new ExportOptions(statusFilterMode, statusPatterns, mimeCategories, extensions, enabled);
+    }
+
+    public ExportOptions withBeautify(boolean enabled) {
+        return new ExportOptions(statusFilterMode, statusPatterns, mimeCategories, extensions, enabled);
+    }
+
+    public boolean saveBeautifiedJavascriptCopy() {
+        return beautify;
+    }
+
     public static Set<String> parseExtensions(String value) {
         return ExtensionFilters.parseExtensions(value);
     }

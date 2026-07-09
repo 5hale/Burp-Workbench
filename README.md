@@ -1,17 +1,29 @@
-﻿# Burp Workbench
+# Burp Workbench
 
 Burp Workbench is a single-jar Burp Suite extension that groups workflow modules around a shared core.
 
-Current modules:
+Current version: `0.4.2`
 
-- `Extractor`: right-click export of selected Site map, Proxy history, Search results, or message editor items while preserving host/path structure, decoded response bodies, duplicate detection, manifest, summary, and local HTML index output.
-- `Search++`: modeless advanced search for Burp HTTP messages with Korean text search, hex search, location/source controls, post-search filters, negative match filtering, request/response preview, and result extraction through the shared extraction handler.
+## Modules
+
+- `Extractor`: exports selected Burp HTTP responses to local files with manifest, index, summary, duplicate handling, and optional JS/JSON beautify before saving.
+- `Search++`: provides a tabbed advanced search window for Burp HTTP messages and can pass selected results to Extractor.
+
+## Install
+
+Build the project and load this shaded jar in Burp Suite:
+
+```text
+target\burp-workbench-extension-0.4.2.jar
+```
+
+Do not install `original-burp-workbench-extension-0.4.2.jar`; that file is Maven's unshaded backup and does not include bundled runtime dependencies such as Brotli/Rhino.
 
 ## Build
 
 Requirements:
 
-- JDK 17
+- JDK 17 or newer
 - Maven
 - Network access for the first dependency resolution
 - Burp Suite with Montoya API support
@@ -21,10 +33,11 @@ mvn test
 mvn clean package
 ```
 
-Install this jar in Burp:
+Expected build outputs:
 
 ```text
-target\burp-workbench-extension-0.4.1.jar
+target\burp-workbench-extension-0.4.2.jar
+target\original-burp-workbench-extension-0.4.2.jar
 ```
 
 ## Architecture
@@ -37,8 +50,3 @@ This project intentionally stays as one Maven project and one jar. Java packages
 - `com.burpworkbench.modules.search`: Search++ module implementation.
 
 See `docs/architecture.md` for dependency rules and extension points.
-
-## Local Work Files
-
-`.work/` is for local TODO/DONE/work process notes and is intentionally ignored by git.
-

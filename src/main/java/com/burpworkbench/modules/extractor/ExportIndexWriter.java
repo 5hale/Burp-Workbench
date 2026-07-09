@@ -20,7 +20,7 @@ public final class ExportIndexWriter {
         html.append("table{border-collapse:collapse;width:100%;font-size:13px}");
         html.append("th,td{border:1px solid #d1d5db;padding:6px 8px;vertical-align:top}");
         html.append("th{background:#f3f4f6;text-align:left}");
-        html.append("tr.saved{background:#f0fdf4}tr.duplicate{background:#fffbeb}tr.skipped{background:#f9fafb}tr.failed{background:#fef2f2}");
+        html.append("tr.saved{background:#f0fdf4}tr.duplicate{background:#fffbeb}tr.skipped{background:#f9fafb}tr.failed,tr.beautify_failed{background:#fef2f2}");
         html.append("code{font-family:Consolas,monospace;white-space:pre-wrap;word-break:break-all}");
         html.append("</style></head><body>\n");
         html.append("<h1>Extractor Index</h1>\n");

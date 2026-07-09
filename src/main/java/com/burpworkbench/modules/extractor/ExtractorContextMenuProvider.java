@@ -6,11 +6,21 @@ import burp.api.montoya.ui.contextmenu.ContextMenuEvent;
 import burp.api.montoya.ui.contextmenu.ContextMenuItemsProvider;
 import burp.api.montoya.ui.contextmenu.InvocationType;
 
+import javax.swing.BorderFactory;
+import javax.swing.JButton;
+import javax.swing.JCheckBox;
+import javax.swing.JDialog;
 import javax.swing.JFileChooser;
 import javax.swing.JMenuItem;
 import javax.swing.JOptionPane;
+import javax.swing.JPanel;
 import javax.swing.SwingWorker;
+import javax.swing.WindowConstants;
+import java.awt.BorderLayout;
 import java.awt.Component;
+import java.awt.FlowLayout;
+import java.awt.Frame;
+import java.io.File;
 import java.nio.file.Path;
 import java.util.Collections;
 import java.util.List;
@@ -62,48 +72,86 @@ public final class ExtractorContextMenuProvider implements ContextMenuItemsProvi
     }
 
     private void chooseDirectoryAndExport(List<HttpRequestResponse> selectedItems, boolean includeSubtree) {
-        Path outputRoot = chooseOutputRoot();
-        if (outputRoot == null) {
+        ExportRequest request = chooseExportRequest();
+        if (request == null) {
             return;
         }
-        api.logging().logToOutput("Extractor started: " + outputRoot);
-        runExport(selectedItems, includeSubtree, outputRoot);
+        api.logging().logToOutput("Extractor started: " + request.outputRoot());
+        runExport(selectedItems, includeSubtree, request);
     }
 
     public boolean chooseDirectoryAndExportSelection(List<HttpRequestResponse> selectedItems) {
-        Path outputRoot = chooseOutputRoot();
-        if (outputRoot == null) {
+        ExportRequest request = chooseExportRequest();
+        if (request == null) {
             return false;
         }
-        api.logging().logToOutput("Search++ extraction started: " + outputRoot);
-        runExport(selectedItems, false, outputRoot);
+        api.logging().logToOutput("Search++ extraction started: " + request.outputRoot());
+        runExport(selectedItems, false, request);
         return true;
     }
 
-    private Path chooseOutputRoot() {
+    private ExportRequest chooseExportRequest() {
         JFileChooser chooser = new JFileChooser();
         chooser.setDialogTitle("Choose Extractor output folder");
         chooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
         chooser.setAcceptAllFileFilterUsed(false);
+        chooser.setControlButtonsAreShown(false);
 
-        int result = chooser.showSaveDialog(null);
-        if (result != JFileChooser.APPROVE_OPTION || chooser.getSelectedFile() == null) {
-            return null;
-        }
-        return chooser.getSelectedFile().toPath();
+        JCheckBox beautify = new JCheckBox("Beautify", true);
+        beautify.setToolTipText("Beautify JS and JSON responses before saving.");
+
+        JPanel optionPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
+        optionPanel.setBorder(BorderFactory.createEmptyBorder(7, 10, 10, 10));
+        optionPanel.add(beautify);
+
+        JButton saveButton = new JButton("Save");
+        JButton cancelButton = new JButton("Cancel");
+        JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 0));
+        buttonPanel.setBorder(BorderFactory.createEmptyBorder(7, 10, 10, 10));
+        buttonPanel.add(saveButton);
+        buttonPanel.add(cancelButton);
+
+        JPanel bottomPanel = new JPanel(new BorderLayout());
+        bottomPanel.add(optionPanel, BorderLayout.WEST);
+        bottomPanel.add(buttonPanel, BorderLayout.EAST);
+
+        JDialog dialog = new JDialog((Frame) null, "Choose Extractor output folder", true);
+        dialog.setDefaultCloseOperation(WindowConstants.DISPOSE_ON_CLOSE);
+        dialog.getContentPane().setLayout(new BorderLayout());
+        dialog.getContentPane().add(chooser, BorderLayout.CENTER);
+        dialog.getContentPane().add(bottomPanel, BorderLayout.SOUTH);
+
+        final ExportRequest[] request = new ExportRequest[1];
+        saveButton.addActionListener(event -> {
+            File selected = chooser.getSelectedFile();
+            if (selected == null) {
+                selected = chooser.getCurrentDirectory();
+            }
+            if (selected != null) {
+                ExportOptions options = ExportOptions.defaults().withBeautify(beautify.isSelected());
+                request[0] = new ExportRequest(selected.toPath(), options);
+            }
+            dialog.dispose();
+        });
+        cancelButton.addActionListener(event -> dialog.dispose());
+        dialog.getRootPane().setDefaultButton(saveButton);
+        dialog.pack();
+        dialog.setLocationRelativeTo(null);
+        dialog.setVisible(true);
+        return request[0];
     }
 
-    private void runExport(List<HttpRequestResponse> selectedItems, boolean includeSubtree, Path outputRoot) {
-                ExportProgressDialog progressDialog = new ExportProgressDialog("Extractor");
-                SwingWorker<ExportSummary, Void> worker = new SwingWorker<>() {
+    private void runExport(List<HttpRequestResponse> selectedItems, boolean includeSubtree, ExportRequest request) {
+        ExportProgressDialog progressDialog = new ExportProgressDialog("Extractor");
+        SwingWorker<ExportSummary, Void> worker = new SwingWorker<>() {
             @Override
             protected ExportSummary doInBackground() throws Exception {
-                            return exportService.export(
-                                    selectedItems,
-                                    includeSubtree,
-                                    outputRoot,
-                                    ExportOptions.defaults(),
-                                    progressDialog
+                return exportService.export(
+                        selectedItems,
+                        includeSubtree,
+                        request.outputRoot(),
+                        request.options(),
+                        progressDialog
                 );
             }
 
@@ -124,5 +172,8 @@ public final class ExtractorContextMenuProvider implements ContextMenuItemsProvi
 
         worker.execute();
         progressDialog.open();
+    }
+
+    private record ExportRequest(Path outputRoot, ExportOptions options) {
     }
 }

@@ -6,7 +6,7 @@
 
     <groupId>com.burpworkbench</groupId>
     <artifactId>burp-workbench-extension</artifactId>
-    <version>0.4.1</version>
+    <version>0.4.2</version>
     <packaging>jar</packaging>
 
     <name>Burp Workbench</name>
@@ -16,6 +16,7 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <maven.compiler.release>17</maven.compiler.release>
         <montoya.version>2025.12</montoya.version>
+        <rhino.version>1.8.0</rhino.version>
         <junit.version>5.13.4</junit.version>
     </properties>
 
@@ -30,6 +31,11 @@
             <groupId>org.brotli</groupId>
             <artifactId>dec</artifactId>
             <version>0.1.2</version>
+        </dependency>
+        <dependency>
+            <groupId>org.mozilla</groupId>
+            <artifactId>rhino</artifactId>
+            <version>${rhino.version}</version>
         </dependency>
         <dependency>
             <groupId>org.junit.jupiter</groupId>

@@ -11,6 +11,7 @@ import burp.api.montoya.http.message.HttpRequestResponse;
 import burp.api.montoya.http.message.responses.HttpResponse;
 
 import java.io.IOException;
+import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -18,9 +19,13 @@ import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public final class ExportService {
     private static final DateTimeFormatter RUN_DIRECTORY_FORMAT = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss");
+    private static final Pattern CHARSET_PATTERN = Pattern.compile("(?i)(?:^|;)\\s*charset\\s*=\\s*\"?([^\";\\s]+)\"?");
 
     private final MontoyaApi api;
     private final UrlPathMapper pathMapper;
@@ -28,6 +33,7 @@ public final class ExportService {
     private final ExportPlanner planner;
     private final ExportIndexWriter indexWriter;
     private final SelectionResolver selectionResolver;
+    private final BodyBeautifier bodyBeautifier;
 
     public ExportService(MontoyaApi api) {
         this.api = api;
@@ -36,6 +42,7 @@ public final class ExportService {
         this.planner = new ExportPlanner();
         this.indexWriter = new ExportIndexWriter();
         this.selectionResolver = new SelectionResolver(api);
+        this.bodyBeautifier = new BodyBeautifier();
     }
 
     public ExportSummary export(List<HttpRequestResponse> selectedItems, boolean includeSubtree, Path outputRoot)
@@ -52,7 +59,7 @@ public final class ExportService {
     ) throws IOException {
         List<ExportCandidate> candidates = analyzeCandidates(selectedItems, includeSubtree);
         ExportPlan plan = planner.plan(candidates, options, selectedItems == null ? 0 : selectedItems.size());
-        return executePlan(plan, outputRoot, progressListener);
+        return executePlan(plan, outputRoot, options, progressListener);
     }
 
     public List<ExportCandidate> analyzeCandidates(List<HttpRequestResponse> selectedItems, boolean includeSubtree) {
@@ -70,7 +77,18 @@ public final class ExportService {
 
     public ExportSummary executePlan(ExportPlan plan, Path outputRoot, ExportProgressListener progressListener)
             throws IOException {
+        return executePlan(plan, outputRoot, ExportOptions.defaults(), progressListener);
+    }
+
+    public ExportSummary executePlan(
+            ExportPlan plan,
+            Path outputRoot,
+            ExportOptions options,
+            ExportProgressListener progressListener
+    )
+            throws IOException {
         ExportProgressListener listener = progressListener == null ? new NoOpExportProgressListener() : progressListener;
+        ExportOptions safeOptions = options == null ? ExportOptions.defaults() : options;
         Path runDirectory = createRunDirectory(outputRoot);
         ExportSummary summary = new ExportSummary(runDirectory, plan.selectedCount());
         summary.setCandidateCount(plan.candidateCount());
@@ -102,7 +120,7 @@ public final class ExportService {
                     break;
                 }
 
-                executeOne(action, runDirectory, manifestWriter, summary, indexRows);
+                executeOne(action, runDirectory, safeOptions, manifestWriter, summary, indexRows);
                 processed++;
                 publishProgress(listener, processed, plan.actions().size(), action.candidate().url(), summary);
             }
@@ -185,6 +203,7 @@ public final class ExportService {
     private void executeOne(
             ExportAction action,
             Path runDirectory,
+            ExportOptions options,
             ManifestWriter manifestWriter,
             ExportSummary summary,
             List<ExportIndexRow> indexRows
@@ -192,7 +211,7 @@ public final class ExportService {
         ExportCandidate candidate = action.candidate();
 
         switch (action.type()) {
-            case SAVED -> saveCandidate(candidate, runDirectory, manifestWriter, summary, indexRows);
+            case SAVED -> saveCandidate(candidate, runDirectory, options, manifestWriter, summary, indexRows);
             case SKIPPED -> {
                 if ("no response".equals(action.reason())) {
                     summary.incrementSkippedNoResponse();
@@ -230,6 +249,7 @@ public final class ExportService {
     private void saveCandidate(
             ExportCandidate candidate,
             Path runDirectory,
+            ExportOptions options,
             ManifestWriter manifestWriter,
             ExportSummary summary,
             List<ExportIndexRow> indexRows
@@ -245,9 +265,10 @@ public final class ExportService {
 
         try {
             Files.createDirectories(outputPath.getParent());
-            Files.write(outputPath, candidate.decodedBody());
             String outputRelativePath = runDirectory.relativize(outputPath).toString();
-            summary.incrementSaved(candidate.rawByteCount(), candidate.savedByteCount());
+            SavePayload payload = savePayload(candidate, outputRelativePath, options, manifestWriter, summary, indexRows);
+            Files.write(outputPath, payload.bytes());
+            summary.incrementSaved(candidate.rawByteCount(), payload.bytes().length);
             manifestWriter.write(ManifestRecord.saved(
                     candidate.url(),
                     candidate.method(),
@@ -258,16 +279,113 @@ public final class ExportService {
                     outputRelativePath,
                     candidate.decoded(),
                     candidate.rawByteCount(),
-                    candidate.savedByteCount(),
-                    candidate.bodySha256(),
-                    candidate.decodeNote()
+                    payload.bytes().length,
+                    payload.sha256(),
+                    payload.note()
             ));
-            indexRows.add(indexRow("saved", candidate, outputRelativePath, "", "", candidate.decodeNote()));
+            indexRows.add(indexRow("saved", candidate, outputRelativePath, "", "", payload.note(), payload.bytes().length));
         } catch (IOException exception) {
             summary.incrementFailed(exception.getMessage());
             manifestWriter.write(ManifestRecord.failed(candidate, exception.getMessage()));
             indexRows.add(indexRow("failed", candidate, candidate.relativePath().toString(), "", "", exception.getMessage()));
         }
+    }
+
+    private SavePayload savePayload(
+            ExportCandidate candidate,
+            String outputRelativePath,
+            ExportOptions options,
+            ManifestWriter manifestWriter,
+            ExportSummary summary,
+            List<ExportIndexRow> indexRows
+    ) throws IOException {
+        byte[] originalBytes = candidate.decodedBody();
+        if (options == null || !options.beautify()) {
+            return new SavePayload(originalBytes, candidate.bodySha256(), candidate.decodeNote());
+        }
+
+        BeautifyType type = beautifyTypeFor(candidate);
+        if (type == null) {
+            return new SavePayload(originalBytes, candidate.bodySha256(), candidate.decodeNote());
+        }
+
+        try {
+            String source = new String(candidate.decodedBody(), charset(candidate.contentType()));
+            BodyBeautifier.BeautifiedText beautified = bodyBeautifier.beautify(type, source);
+            byte[] beautifiedBytes = beautified.text().getBytes(StandardCharsets.UTF_8);
+            summary.incrementBeautified(beautifiedBytes.length);
+            return new SavePayload(
+                    beautifiedBytes,
+                    Hashes.sha256Hex(beautifiedBytes),
+                    appendNote(candidate.decodeNote(), "beautified " + type.label() + ": " + beautified.note())
+            );
+        } catch (RuntimeException exception) {
+            String error = type.label() + " beautify failed: " + exception.getMessage();
+            summary.incrementBeautifyFailed(error);
+            manifestWriter.write(ManifestRecord.beautifyFailed(candidate, outputRelativePath, error));
+            indexRows.add(indexRow("beautify_failed", candidate, outputRelativePath, "", "", error));
+            return new SavePayload(originalBytes, candidate.bodySha256(), candidate.decodeNote());
+        }
+    }
+
+    static boolean isJavascriptCandidate(ExportCandidate candidate) {
+        if (candidate == null) {
+            return false;
+        }
+        String extension = candidate.extension();
+        String contentType = candidate.contentType().toLowerCase(Locale.ROOT);
+        return candidate.mimeCategory() == MimeCategory.JAVASCRIPT
+                || ".js".equals(extension)
+                || ".mjs".equals(extension)
+                || contentType.contains("javascript")
+                || contentType.contains("ecmascript");
+    }
+
+    static BeautifyType beautifyTypeFor(ExportCandidate candidate) {
+        if (candidate == null) {
+            return null;
+        }
+        if (isJavascriptCandidate(candidate)) {
+            return BeautifyType.JAVASCRIPT;
+        }
+        String extension = candidate.extension();
+        String contentType = normalizedContentType(candidate.contentType());
+        if (candidate.mimeCategory() == MimeCategory.JSON
+                || ".json".equals(extension)
+                || ".map".equals(extension)
+                || contentType.equals("application/json")
+                || contentType.endsWith("+json")) {
+            return BeautifyType.JSON;
+        }
+        return null;
+    }
+
+    private String appendNote(String existing, String addition) {
+        if (existing == null || existing.isBlank()) {
+            return addition;
+        }
+        return existing + "; " + addition;
+    }
+
+    private static String normalizedContentType(String contentType) {
+        String value = contentType == null ? "" : contentType;
+        int semicolon = value.indexOf(';');
+        if (semicolon >= 0) {
+            value = value.substring(0, semicolon);
+        }
+        return value.trim().toLowerCase(Locale.ROOT);
+    }
+
+    private Charset charset(String contentType) {
+        Matcher matcher = CHARSET_PATTERN.matcher(contentType == null ? "" : contentType);
+        if (matcher.find()) {
+            try {
+                return Charset.forName(matcher.group(1));
+            } catch (RuntimeException ignored) {
+                return StandardCharsets.UTF_8;
+            }
+        }
+        return StandardCharsets.UTF_8;
     }
 
     private ExportIndexRow indexRow(
@@ -278,6 +396,18 @@ public final class ExportService {
             String duplicateOfUrl,
             String reason
     ) {
+        return indexRow(action, candidate, outputPath, duplicateOfPath, duplicateOfUrl, reason, candidate.savedByteCount());
+    }
+
+    private ExportIndexRow indexRow(
+            String action,
+            ExportCandidate candidate,
+            String outputPath,
+            String duplicateOfPath,
+            String duplicateOfUrl,
+            String reason,
+            long savedByteCount
+    ) {
         return new ExportIndexRow(
                 action,
                 candidate.method(),
@@ -285,12 +415,15 @@ public final class ExportService {
                 candidate.statusCode(),
                 candidate.mimeCategory().label(),
                 candidate.contentType(),
-                candidate.savedByteCount(),
+                savedByteCount,
                 outputPath,
                 duplicateOfPath,
                 duplicateOfUrl,
                 reason
         );
+    }
+
+    private record SavePayload(byte[] bytes, String sha256, String note) {
     }
 
     private void publishProgress(

@@ -116,6 +116,19 @@ public final class ManifestRecord {
         return new ManifestRecord(values);
     }
 
+    public static ManifestRecord beautifyFailed(ExportCandidate candidate, String outputPath, String error) {
+        Map<String, Object> values = base("beautify_failed", candidate.url(), candidate.method(), candidate.statusCode());
+        values.put("contentEncoding", candidate.contentEncoding());
+        values.put("contentType", candidate.contentType());
+        values.put("mimeCategory", candidate.mimeCategory().label());
+        values.put("outputPath", outputPath);
+        values.put("rawBytes", candidate.rawByteCount());
+        values.put("savedBytes", candidate.savedByteCount());
+        values.put("sha256", candidate.bodySha256());
+        values.put("error", error);
+        return new ManifestRecord(values);
+    }
+
     public static ManifestRecord cancelled(String reason, int remaining) {
         Map<String, Object> values = base("cancelled", "", "", -1);
         values.put("reason", reason);
