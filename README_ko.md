@@ -2,7 +2,7 @@
 
 Burp Workbench는 공통 core 위에 여러 워크플로우 모듈을 묶은 단일 jar Burp Suite 확장입니다.
 
-현재 버전: `0.4.2`
+현재 버전: `0.4.3`
 
 ## 모듈
 
@@ -14,10 +14,10 @@ Burp Workbench는 공통 core 위에 여러 워크플로우 모듈을 묶은 단
 프로젝트를 빌드한 뒤 아래 shaded jar를 Burp Suite에 로드합니다.
 
 ```text
-target\burp-workbench-extension-0.4.2.jar
+target\burp-workbench-extension-0.4.3.jar
 ```
 
-`original-burp-workbench-extension-0.4.2.jar`는 설치하지 마세요. 이 파일은 Maven이 남기는 unshaded backup이며 Brotli/Rhino 같은 번들 런타임 의존성이 포함되지 않습니다.
+`original-burp-workbench-extension-0.4.3.jar`는 설치하지 마세요. 이 파일은 Maven이 남기는 unshaded backup이며 Brotli/Rhino 같은 번들 런타임 의존성이 포함되지 않습니다.
 
 ## 빌드
 
@@ -36,8 +36,8 @@ mvn clean package
 예상 빌드 산출물:
 
 ```text
-target\burp-workbench-extension-0.4.2.jar
-target\original-burp-workbench-extension-0.4.2.jar
+target\burp-workbench-extension-0.4.3.jar
+target\original-burp-workbench-extension-0.4.3.jar
 ```
 
 ## 아키텍처

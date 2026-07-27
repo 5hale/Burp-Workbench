@@ -1,19 +1,31 @@
 package com.burpworkbench.modules.search;
 
-import com.burpworkbench.core.http.HttpExchange;
 import com.burpworkbench.core.filter.MimeCategory;
+import com.burpworkbench.core.http.HttpExchange;
 
+import burp.api.montoya.core.ByteArray;
 import burp.api.montoya.http.message.HttpMessage;
 import burp.api.montoya.http.message.HttpRequestResponse;
+import burp.api.montoya.proxy.ProxyHttpRequestResponse;
 
+import java.io.ByteArrayOutputStream;
 import java.net.URI;
+import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
 import java.nio.charset.Charset;
+import java.nio.charset.CharsetDecoder;
+import java.nio.charset.CharsetEncoder;
+import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CancellationException;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
 
@@ -23,27 +35,24 @@ public final class SearchEngine {
             return List.of();
         }
 
-        SearchOptions safeOptions = safeOptions(options);
-
+        PreparedSearch preparedSearch = prepare(options);
         List<SearchResult> results = new ArrayList<>();
         for (HttpExchange exchange : exchanges) {
-            if (matches(exchange, safeOptions)) {
+            if (preparedSearch.matches(exchange)) {
                 results.add(toResult(exchange));
             }
         }
         return results;
     }
 
-    public boolean matches(HttpExchange exchange, SearchOptions options) {
-        if (exchange == null) {
-            return false;
-        }
-        SearchOptions safeOptions = safeOptions(options);
-        return matchesFilters(exchange, safeOptions) && matchesQuery(exchange, safeOptions);
+    public PreparedSearch prepare(SearchOptions options) {
+        return new PreparedSearch(safeOptions(options));
     }
 
     public SearchResult toResult(HttpExchange exchange) {
-        return new SearchResult(exchange, mimeLabel(exchange), responseLength(exchange));
+        String mime = mimeLabel(exchange);
+        long length = responseLength(exchange);
+        return new SearchResult(exchange.copyToTempFile(), mime, length);
     }
 
     private SearchOptions safeOptions(SearchOptions options) {
@@ -54,9 +63,11 @@ public final class SearchEngine {
     }
 
     boolean matchesFilters(HttpExchange exchange, SearchOptions options) {
-        int statusCode = exchange.statusCode();
-        if (!options.allStatus() && !matchesCustomStatus(statusCode, options.statusPatterns())) {
-            return false;
+        if (!options.allStatus()) {
+            int statusCode = exchange.statusCode();
+            if (!matchesCustomStatus(statusCode, options.statusPatterns())) {
+                return false;
+            }
         }
 
         if (options.mimeFilterEnabled() && options.mimeCategories().isEmpty()) {
@@ -68,14 +79,17 @@ public final class SearchEngine {
             }
         }
 
-        String extension = extension(exchange);
         if (!options.extensions().isEmpty()) {
+            String extension = extension(exchange);
             if (!options.extensions().contains(extension)) {
                 return false;
             }
         }
-        if (!options.excludedExtensions().isEmpty() && options.excludedExtensions().contains(extension)) {
-            return false;
+        if (!options.excludedExtensions().isEmpty()) {
+            String extension = extension(exchange);
+            if (options.excludedExtensions().contains(extension)) {
+                return false;
+            }
         }
 
         return true;
@@ -101,106 +115,63 @@ public final class SearchEngine {
         return false;
     }
 
-    private boolean matchesQuery(HttpExchange exchange, SearchOptions options) {
-        if (options.query().isBlank()) {
-            return !options.negativeMatch();
-        }
+    private boolean matchesSelectedParts(HttpExchange exchange, PreparedSearch preparedSearch) {
+        SearchOptions options = preparedSearch.options;
+        HttpRequestResponse requestResponse = exchange.requestResponse();
 
-        boolean matched = switch (options.mode()) {
-            case HEX -> matchesHex(exchange, options);
-            case TEXT -> matchesText(exchange, options);
-        };
-        return options.negativeMatch() ? !matched : matched;
-    }
-
-    private boolean matchesHex(HttpExchange exchange, SearchOptions options) {
-        byte[] needle = parseHex(options.query());
-        if (needle.length == 0) {
-            return false;
-        }
-
-        for (MessagePart part : selectedParts(exchange, options)) {
-            if (containsBytes(part.bytes(), needle)) {
+        try {
+            HttpMessage request = requestResponse.request();
+            if (options.requestHeaders() && preparedSearch.matches(partForHeaders(request))) {
                 return true;
             }
-        }
-        return false;
-    }
-
-    private boolean matchesText(HttpExchange exchange, SearchOptions options) {
-        Pattern pattern = null;
-        if (options.regex()) {
-            try {
-                pattern = Pattern.compile(options.query(), options.caseSensitive() ? 0 : Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
-            } catch (PatternSyntaxException exception) {
-                return false;
+            if (options.requestBody() && preparedSearch.matches(partForBody(request))) {
+                return true;
             }
-        }
-
-        for (MessagePart part : selectedParts(exchange, options)) {
-            for (Charset charset : charsets(part.message())) {
-                String text = new String(part.bytes(), charset);
-                if (options.regex()) {
-                    if (pattern.matcher(text).find()) {
-                        return true;
-                    }
-                } else if (containsText(text, options.query(), options.caseSensitive())) {
+            if (requestResponse.hasResponse() && requestResponse.response() != null) {
+                HttpMessage response = requestResponse.response();
+                if (options.responseHeaders() && preparedSearch.matches(partForHeaders(response))) {
+                    return true;
+                }
+                if (options.responseBody() && preparedSearch.matches(partForBody(response))) {
                     return true;
                 }
             }
+        } catch (CancellationException exception) {
+            throw exception;
+        } catch (RuntimeException ignored) {
+            return false;
         }
+
         return false;
     }
 
-    private List<MessagePart> selectedParts(HttpExchange exchange, SearchOptions options) {
-        HttpRequestResponse requestResponse = exchange.requestResponse();
-        List<MessagePart> parts = new ArrayList<>();
-
-        try {
-            if (options.requestHeaders()) {
-                parts.add(new MessagePart(requestResponse.request(), headersBytes(requestResponse.request())));
-            }
-            if (options.requestBody()) {
-                parts.add(new MessagePart(requestResponse.request(), requestResponse.request().body().getBytes()));
-            }
-            if (requestResponse.hasResponse() && requestResponse.response() != null) {
-                if (options.responseHeaders()) {
-                    parts.add(new MessagePart(requestResponse.response(), headersBytes(requestResponse.response())));
-                }
-                if (options.responseBody()) {
-                    parts.add(new MessagePart(requestResponse.response(), requestResponse.response().body().getBytes()));
-                }
-            }
-        } catch (RuntimeException ignored) {
-            return List.of();
-        }
-
-        return parts;
+    private MessagePart partForHeaders(HttpMessage message) {
+        ByteArray bytes = message.toByteArray();
+        int end = Math.max(0, Math.min(message.bodyOffset(), bytes.length()));
+        return new MessagePart(message, bytes, 0, end);
     }
 
-    private byte[] headersBytes(HttpMessage message) {
-        byte[] all = message.toByteArray().getBytes();
-        int bodyOffset = Math.max(0, Math.min(message.bodyOffset(), all.length));
-        byte[] headers = new byte[bodyOffset];
-        System.arraycopy(all, 0, headers, 0, bodyOffset);
-        return headers;
+    private MessagePart partForBody(HttpMessage message) {
+        ByteArray bytes = message.body();
+        return new MessagePart(message, bytes, 0, bytes.length());
     }
 
-    private boolean containsText(String text, String query, boolean caseSensitive) {
-        if (caseSensitive) {
-            return text.contains(query);
-        }
-        return text.toLowerCase(Locale.ROOT).contains(query.toLowerCase(Locale.ROOT));
-    }
-
-    private boolean containsBytes(byte[] haystack, byte[] needle) {
-        if (needle.length == 0 || haystack.length < needle.length) {
+    private boolean containsBytes(MessagePart part, byte[] needle, byte[] asciiFoldMask) {
+        if (needle.length == 0 || part.length() < needle.length) {
             return false;
         }
-        for (int i = 0; i <= haystack.length - needle.length; i++) {
+        int lastStart = part.endExclusive() - needle.length;
+        for (int index = part.startInclusive(); index <= lastStart; index++) {
+            if ((index & 0x3fff) == 0) {
+                ensureSearchNotCancelled();
+            }
             boolean matched = true;
-            for (int j = 0; j < needle.length; j++) {
-                if (haystack[i + j] != needle[j]) {
+            for (int needleIndex = 0; needleIndex < needle.length; needleIndex++) {
+                byte actual = part.bytes().getByte(index + needleIndex);
+                byte expected = needle[needleIndex];
+                if (asciiFoldMask != null && asciiFoldMask[needleIndex] != 0
+                        ? asciiLower(actual) != asciiLower(expected)
+                        : actual != expected) {
                     matched = false;
                     break;
                 }
@@ -210,6 +181,51 @@ public final class SearchEngine {
             }
         }
         return false;
+    }
+
+    private byte asciiLower(byte value) {
+        return value >= 'A' && value <= 'Z' ? (byte) (value + ('a' - 'A')) : value;
+    }
+
+    private boolean containsAsciiText(MessagePart part, String query, boolean caseSensitive) {
+        ensureSearchNotCancelled();
+        return part.bytes().indexOf(
+                query,
+                caseSensitive,
+                part.startInclusive(),
+                part.endExclusive()
+        ) >= 0;
+    }
+
+    private byte[] copyBytes(MessagePart part) {
+        ensureSearchNotCancelled();
+        byte[] copy = new byte[part.length()];
+        for (int index = 0; index < copy.length; index++) {
+            if ((index & 0x3fff) == 0) {
+                ensureSearchNotCancelled();
+            }
+            copy[index] = part.bytes().getByte(part.startInclusive() + index);
+        }
+        return copy;
+    }
+
+    private boolean containsTextIgnoringCase(String text, String query) {
+        int lastStart = text.length() - query.length();
+        for (int index = 0; index <= lastStart; index++) {
+            if ((index & 0x3fff) == 0) {
+                ensureSearchNotCancelled();
+            }
+            if (text.regionMatches(true, index, query, 0, query.length())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void ensureSearchNotCancelled() {
+        if (Thread.currentThread().isInterrupted()) {
+            throw new CancellationException();
+        }
     }
 
     private byte[] parseHex(String value) {
@@ -262,8 +278,24 @@ public final class SearchEngine {
     }
 
     private MimeCategory mimeCategory(HttpExchange exchange) {
-        MimeCategory category = MimeCategory.from(contentType(exchange), Path.of(fileName(exchange)));
+        MimeCategory category = MimeCategory.from(contentType(exchange), safeFileNamePath(fileName(exchange)));
         return category == MimeCategory.FONT || category == MimeCategory.ARCHIVE ? MimeCategory.OTHER : category;
+    }
+
+    private Path safeFileNamePath(String fileName) {
+        StringBuilder sanitized = new StringBuilder(fileName.length());
+        for (int index = 0; index < fileName.length(); index++) {
+            char character = fileName.charAt(index);
+            sanitized.append(isInvalidWindowsFileNameCharacter(character) ? '_' : character);
+        }
+        return Path.of(sanitized.toString());
+    }
+
+    private boolean isInvalidWindowsFileNameCharacter(char character) {
+        return character < 32 || switch (character) {
+            case '<', '>', ':', '"', '/', '\\', '|', '?', '*' -> true;
+            default -> false;
+        };
     }
 
     private String mimeLabel(HttpExchange exchange) {
@@ -309,6 +341,272 @@ public final class SearchEngine {
         }
     }
 
-    private record MessagePart(HttpMessage message, byte[] bytes) {
+    public final class PreparedSearch {
+        private final SearchOptions options;
+        private final Pattern textPattern;
+        private final byte[] hexNeedle;
+        private final boolean literalByteSearch;
+        private final boolean asciiFoldByteSearch;
+        private final Map<Charset, EncodedNeedle> encodedNeedles = new HashMap<>();
+
+        private PreparedSearch(SearchOptions options) {
+            this.options = options;
+            Pattern compiledPattern = null;
+            if (options.mode() == SearchMode.TEXT && options.regex() && !options.query().isBlank()) {
+                try {
+                    compiledPattern = Pattern.compile(
+                            options.query(),
+                            options.caseSensitive() ? 0 : Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE
+                    );
+                } catch (PatternSyntaxException exception) {
+                    throw new IllegalArgumentException(
+                            "Invalid regular expression: " + exception.getDescription(),
+                            exception
+                    );
+                }
+            }
+            this.textPattern = compiledPattern;
+            this.hexNeedle = options.mode() == SearchMode.HEX ? parseHex(options.query()) : new byte[0];
+            this.literalByteSearch = options.caseSensitive() || hasNoCaseVariants(options.query());
+            this.asciiFoldByteSearch = !options.caseSensitive() && hasOnlyAsciiCaseVariants(options.query());
+        }
+
+        public boolean matches(HttpExchange exchange) {
+            if (exchange == null || !SearchEngine.this.matchesFilters(exchange, options)) {
+                return false;
+            }
+            if (options.query().isBlank()) {
+                return !options.negativeMatch();
+            }
+
+            boolean matched = switch (options.mode()) {
+                case HEX -> hexNeedle.length > 0 && matchesSelectedParts(exchange, this);
+                case TEXT -> matchesSelectedParts(exchange, this);
+            };
+            return options.negativeMatch() ? !matched : matched;
+        }
+
+        public boolean matchesFilters(HttpExchange exchange) {
+            return exchange != null && SearchEngine.this.matchesFilters(exchange, options);
+        }
+
+        public boolean hasExchangeFilters() {
+            return !options.allStatus()
+                    || options.mimeFilterEnabled()
+                    || !options.mimeCategories().isEmpty()
+                    || !options.extensions().isEmpty()
+                    || !options.excludedExtensions().isEmpty();
+        }
+
+        public boolean supportsNativeWholeMessageSearch() {
+            return options.mode() == SearchMode.TEXT
+                    && !options.query().isBlank()
+                    && isAscii(options.query())
+                    && options.requestHeaders()
+                    && options.requestBody()
+                    && options.responseHeaders()
+                    && options.responseBody();
+        }
+
+        public boolean matchesNativeQuery(HttpRequestResponse requestResponse) {
+            if (!supportsNativeWholeMessageSearch() || requestResponse == null) {
+                return false;
+            }
+            boolean matched = options.regex()
+                    ? requestResponse.contains(textPattern)
+                    : requestResponse.contains(options.query(), options.caseSensitive());
+            return options.negativeMatch() ? !matched : matched;
+        }
+
+        public boolean matchesNativeQuery(ProxyHttpRequestResponse requestResponse) {
+            if (!supportsNativeWholeMessageSearch() || requestResponse == null) {
+                return false;
+            }
+            boolean matched = options.regex()
+                    ? requestResponse.contains(textPattern)
+                    : requestResponse.contains(options.query(), options.caseSensitive());
+            return options.negativeMatch() ? !matched : matched;
+        }
+
+        private boolean matches(MessagePart part) {
+            if (options.mode() == SearchMode.HEX) {
+                return containsBytes(part, hexNeedle, null);
+            }
+            if (options.regex()) {
+                return matchesDecoded(part, true);
+            }
+            if (isAscii(options.query())) {
+                return containsAsciiText(part, options.query(), options.caseSensitive());
+            }
+            if (literalByteSearch || asciiFoldByteSearch) {
+                boolean foldAsciiQueryCharacters = !literalByteSearch && asciiFoldByteSearch;
+                Charset declared = declaredCharset(part.message());
+                if (foldAsciiQueryCharacters && declared == null) {
+                    return matchesDecoded(part, false);
+                }
+
+                List<Charset> candidateCharsets =
+                        declared == null ? charsets(part.message()) : List.of(declared);
+                for (Charset charset : candidateCharsets) {
+                    EncodedNeedle needle = encodedNeedle(charset);
+                    if (needle.bytes().length == 0) {
+                        continue;
+                    }
+                    if (foldAsciiQueryCharacters && !needle.supportsAsciiFold()) {
+                        return matchesDecoded(part, false);
+                    }
+                    byte[] foldMask = foldAsciiQueryCharacters ? needle.asciiFoldMask() : null;
+                    if (containsBytes(part, needle.bytes(), foldMask)) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+            return matchesDecoded(part, false);
+        }
+
+        private boolean matchesDecoded(MessagePart part, boolean regex) {
+            byte[] bytes = copyBytes(part);
+            Charset declared = declaredCharset(part.message());
+            List<Charset> candidateCharsets =
+                    declared == null ? charsets(part.message()) : List.of(declared);
+            for (Charset charset : candidateCharsets) {
+                ensureSearchNotCancelled();
+                if (matchesDecoded(bytes, charset, regex)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private boolean matchesDecoded(byte[] bytes, Charset charset, boolean regex) {
+            CharsetDecoder decoder = charset.newDecoder()
+                    .onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT);
+            String text;
+            try {
+                text = decoder.decode(ByteBuffer.wrap(bytes)).toString();
+            } catch (CharacterCodingException exception) {
+                return false;
+            }
+            return regex
+                    ? textPattern.matcher(new InterruptibleCharSequence(text)).find()
+                    : containsTextIgnoringCase(text, options.query());
+        }
+
+        private EncodedNeedle encodedNeedle(Charset charset) {
+            return encodedNeedles.computeIfAbsent(charset, value -> {
+                CharsetEncoder encoder = value.newEncoder();
+                if (!encoder.canEncode(options.query())) {
+                    return EncodedNeedle.notEncodable();
+                }
+
+                byte[] encoded = options.query().getBytes(value);
+                if (!asciiFoldByteSearch || literalByteSearch) {
+                    return new EncodedNeedle(encoded, null, true);
+                }
+
+                ByteArrayOutputStream segmented = new ByteArrayOutputStream(encoded.length);
+                ByteArrayOutputStream foldMask = new ByteArrayOutputStream(encoded.length);
+                boolean foldSupported = true;
+                int offset = 0;
+                while (offset < options.query().length()) {
+                    int character = options.query().codePointAt(offset);
+                    String segment = new String(Character.toChars(character));
+                    byte[] segmentBytes = segment.getBytes(value);
+                    segmented.writeBytes(segmentBytes);
+
+                    boolean asciiLetter = (character >= 'A' && character <= 'Z')
+                            || (character >= 'a' && character <= 'z');
+                    if (asciiLetter
+                            && (segmentBytes.length != 1 || segmentBytes[0] != (byte) character)) {
+                        foldSupported = false;
+                    }
+                    for (int index = 0; index < segmentBytes.length; index++) {
+                        foldMask.write(asciiLetter ? 1 : 0);
+                    }
+                    offset += Character.charCount(character);
+                }
+
+                byte[] segmentedBytes = segmented.toByteArray();
+                if (!Arrays.equals(encoded, segmentedBytes)) {
+                    foldSupported = false;
+                }
+                foldSupported = foldSupported && hasSafeAsciiByteBoundaries(value);
+                return new EncodedNeedle(
+                        encoded,
+                        foldMask.toByteArray(),
+                        foldSupported
+                );
+            });
+        }
+
+        private boolean hasSafeAsciiByteBoundaries(Charset charset) {
+            return charset.equals(StandardCharsets.UTF_8)
+                    || charset.equals(StandardCharsets.ISO_8859_1)
+                    || charset.equals(Charset.forName("EUC-KR"));
+        }
+
+        private boolean isAscii(String value) {
+            return value.chars().allMatch(character -> character <= 0x7f);
+        }
+
+        private boolean hasNoCaseVariants(String value) {
+            return value.equals(value.toLowerCase(Locale.ROOT)) && value.equals(value.toUpperCase(Locale.ROOT));
+        }
+
+        private boolean hasOnlyAsciiCaseVariants(String value) {
+            return value.codePoints().allMatch(character ->
+                    character <= 0x7f
+                            || (Character.toLowerCase(character) == character
+                            && Character.toUpperCase(character) == character)
+            );
+        }
+    }
+
+    private record InterruptibleCharSequence(CharSequence delegate) implements CharSequence {
+        @Override
+        public int length() {
+            return delegate.length();
+        }
+
+        @Override
+        public char charAt(int index) {
+            if (Thread.currentThread().isInterrupted()) {
+                throw new CancellationException();
+            }
+            return delegate.charAt(index);
+        }
+
+        @Override
+        public CharSequence subSequence(int start, int end) {
+            return new InterruptibleCharSequence(delegate.subSequence(start, end));
+        }
+
+        @Override
+        public String toString() {
+            return delegate.toString();
+        }
+    }
+
+    private record EncodedNeedle(
+            byte[] bytes,
+            byte[] asciiFoldMask,
+            boolean supportsAsciiFold
+    ) {
+        private static EncodedNeedle notEncodable() {
+            return new EncodedNeedle(new byte[0], null, false);
+        }
+    }
+
+    private record MessagePart(
+            HttpMessage message,
+            ByteArray bytes,
+            int startInclusive,
+            int endExclusive
+    ) {
+        private int length() {
+            return endExclusive - startInclusive;
+        }
     }
 }

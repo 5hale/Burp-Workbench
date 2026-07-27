@@ -2,7 +2,7 @@
 
 Burp Workbench is a single-jar Burp Suite extension that groups workflow modules around a shared core.
 
-Current version: `0.4.2`
+Current version: `0.4.3`
 
 ## Modules
 
@@ -14,10 +14,10 @@ Current version: `0.4.2`
 Build the project and load this shaded jar in Burp Suite:
 
 ```text
-target\burp-workbench-extension-0.4.2.jar
+target\burp-workbench-extension-0.4.3.jar
 ```
 
-Do not install `original-burp-workbench-extension-0.4.2.jar`; that file is Maven's unshaded backup and does not include bundled runtime dependencies such as Brotli/Rhino.
+Do not install `original-burp-workbench-extension-0.4.3.jar`; that file is Maven's unshaded backup and does not include bundled runtime dependencies such as Brotli/Rhino.
 
 ## Build
 
@@ -36,8 +36,8 @@ mvn clean package
 Expected build outputs:
 
 ```text
-target\burp-workbench-extension-0.4.2.jar
-target\original-burp-workbench-extension-0.4.2.jar
+target\burp-workbench-extension-0.4.3.jar
+target\original-burp-workbench-extension-0.4.3.jar
 ```
 
 ## Architecture

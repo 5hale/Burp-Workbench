@@ -9,6 +9,14 @@ public record HttpExchange(
         HttpRequestResponse requestResponse,
         ZonedDateTime time
 ) {
+    public HttpExchange copyToTempFile() {
+        HttpRequestResponse stored = requestResponse.copyToTempFile();
+        if (stored == null) {
+            throw new IllegalStateException("Montoya did not create temporary-file storage");
+        }
+        return new HttpExchange(source, stored, time);
+    }
+
     public String host() {
         try {
             return requestResponse.httpService().host();

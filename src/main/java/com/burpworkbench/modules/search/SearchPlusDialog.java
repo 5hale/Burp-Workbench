@@ -69,9 +69,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CancellationException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Predicate;
-import java.util.function.Supplier;
 
 public final class SearchPlusDialog extends JFrame {
     private static final DateTimeFormatter TIME_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
@@ -95,14 +97,15 @@ public final class SearchPlusDialog extends JFrame {
             MimeCategory.OTHER
     );
     private final MontoyaApi api;
-    private final List<HttpExchange> contextExchanges;
-    private final List<SelectionScope> contextScopes;
     private final RepeaterCache repeaterCache;
     private final Predicate<List<HttpRequestResponse>> extractHandler;
     private final SearchEngine searchEngine = new SearchEngine();
+    private final SearchSourceScanner sourceScanner;
+    private final SearchContextPolicy contextPolicy;
     private final JPanel searchTabs = new JPanel(new WrapFlowLayout(FlowLayout.LEFT, 4, 2));
     private final List<SearchPlusTabState> tabStates = new ArrayList<>();
     private final JTextField queryField = new JTextField(24);
+    private final JButton searchButton = iconButton(new SearchIcon(), "Search");
     private final JComboBox<SearchMode> modeCombo = new JComboBox<>(SearchMode.values());
     private final JToggleButton regexCheck = textToggleButton(".*", "Regex");
     private final JToggleButton caseCheck = textToggleButton("Cc", "Case sensitive");
@@ -143,12 +146,24 @@ public final class SearchPlusDialog extends JFrame {
     private final HttpRequestEditor requestEditor;
     private final HttpResponseEditor responseEditor;
     private final JPanel responseHolder = new JPanel(new BorderLayout());
+    private final ExecutorService searchExecutor = Executors.newSingleThreadExecutor(runnable -> {
+        Thread thread = new Thread(runnable, "burp-workbench-search");
+        thread.setDaemon(true);
+        return thread;
+    });
     private List<SearchResult> currentResults = List.of();
     private List<SearchResult> allResults = List.of();
     private String activeNegativeFilter = "";
     private SwingWorker<Void, SearchResult> currentWorker;
+    private AtomicBoolean currentCancellation = new AtomicBoolean();
+    private volatile Thread currentSearchThread;
     private int activeTabIndex = -1;
     private int nextTabNumber = 1;
+    private long nextSearchRunId = 1;
+    private boolean lastSearchCancelled;
+    private boolean lastSearchFailed;
+    private int lastSkippedResults;
+    private int lastMalformedItems;
     private boolean restoringTabState;
 
     private SearchPlusDialog(
@@ -162,13 +177,26 @@ public final class SearchPlusDialog extends JFrame {
         super("Search++");
         this.api = api;
         List<HttpRequestResponse> safeContextItems = contextItems == null ? List.of() : List.copyOf(contextItems);
-        this.contextExchanges = HttpExchangeFactory.fromRequestResponses("Context", safeContextItems);
-        this.contextScopes = contextScopes == null ? List.of() : List.copyOf(contextScopes);
+        List<HttpExchange> contextExchanges =
+                HttpExchangeFactory.fromRequestResponses("Context", safeContextItems);
+        List<SelectionScope> safeContextScopes =
+                contextScopes == null ? List.of() : List.copyOf(contextScopes);
         this.repeaterCache = repeaterCache;
         this.extractHandler = extractHandler;
+        this.sourceScanner = new SearchSourceScanner(
+                api,
+                contextExchanges,
+                safeContextScopes,
+                repeaterCache
+        );
+        this.contextPolicy = SearchContextPolicy.from(
+                contextExchanges.size(),
+                safeContextScopes.size()
+        );
         this.requestEditor = api.userInterface().createHttpRequestEditor(EditorOptions.READ_ONLY);
         this.responseEditor = api.userInterface().createHttpResponseEditor(EditorOptions.READ_ONLY);
 
+        configureContextSourceDefaults();
         initializeMimeChecks();
         initializeSearchTabs();
         configureShrinkableTextFields();
@@ -177,7 +205,7 @@ public final class SearchPlusDialog extends JFrame {
         add(topPanel(), BorderLayout.NORTH);
         add(resultsAndPreviewPanel(), BorderLayout.CENTER);
 
-        contextLabel.setText("Context: " + contextExchanges.size() + " items");
+        contextLabel.setText(contextPolicy.label());
         configureFilterControls();
         configureTable();
         queryField.addActionListener(event -> runSearch());
@@ -192,11 +220,7 @@ public final class SearchPlusDialog extends JFrame {
                 closeOwnedWindows();
             }
         });
-        if (this.contextExchanges.isEmpty()) {
-            clearPreview();
-        } else {
-            runSearch();
-        }
+        clearPreview();
 
         setPreferredSize(DIALOG_PREFERRED_SIZE);
         setMinimumSize(DIALOG_MINIMUM_SIZE);
@@ -279,7 +303,7 @@ public final class SearchPlusDialog extends JFrame {
     }
 
     private void initializeSearchTabs() {
-        SearchPlusTabState state = SearchPlusTabState.initial(nextTabNumber++);
+        SearchPlusTabState state = newSearchTabState(nextTabNumber++);
         captureCurrentUiState(state);
         tabStates.add(state);
         activeTabIndex = 0;
@@ -289,7 +313,7 @@ public final class SearchPlusDialog extends JFrame {
     private void createSearchTab() {
         saveActiveTabState();
         cancelRunningSearch();
-        SearchPlusTabState state = SearchPlusTabState.initial(nextTabNumber++);
+        SearchPlusTabState state = newSearchTabState(nextTabNumber++);
         tabStates.add(state);
         int index = tabStates.size() - 1;
         activeTabIndex = index;
@@ -316,7 +340,7 @@ public final class SearchPlusDialog extends JFrame {
         }
         if (tabStates.size() == 1) {
             cancelRunningSearch();
-            SearchPlusTabState resetState = SearchPlusTabState.initial(1);
+            SearchPlusTabState resetState = newSearchTabState(1);
             tabStates.set(0, resetState);
             activeTabIndex = 0;
             refreshTabBar();
@@ -344,6 +368,24 @@ public final class SearchPlusDialog extends JFrame {
             int nextIndex = Math.min(index, tabStates.size() - 1);
             selectSearchTab(nextIndex);
         }
+    }
+
+    private void configureContextSourceDefaults() {
+        SourceSelection defaults = contextPolicy.sourceSelection();
+        targetSourceCheck.setSelected(defaults.target());
+        proxySourceCheck.setSelected(defaults.proxy());
+        repeaterSourceCheck.setSelected(defaults.repeater());
+        organizerSourceCheck.setSelected(defaults.organizer());
+    }
+
+    private SearchPlusTabState newSearchTabState(int number) {
+        SearchPlusTabState state = SearchPlusTabState.initial(number);
+        SourceSelection defaults = contextPolicy.sourceSelection();
+        state.includeTarget = defaults.target();
+        state.includeProxy = defaults.proxy();
+        state.includeRepeater = defaults.repeater();
+        state.includeOrganizer = defaults.organizer();
+        return state;
     }
 
     private void maybeShowTabMenu(MouseEvent event) {
@@ -555,6 +597,10 @@ public final class SearchPlusDialog extends JFrame {
         state.setResults(allResults, currentResults);
         state.selectedModelRows = selectedModelRows();
         state.countText = countLabel.getText();
+        state.searchCancelled = lastSearchCancelled;
+        state.searchFailed = lastSearchFailed;
+        state.skippedResults = lastSkippedResults;
+        state.malformedItems = lastMalformedItems;
     }
 
     private void restoreTabState(SearchPlusTabState state) {
@@ -589,6 +635,10 @@ public final class SearchPlusDialog extends JFrame {
             syncExtensionFields();
             replaceResults(state.currentResults, state.selectedModelRows);
             allResults = new ArrayList<>(state.allResults);
+            lastSearchCancelled = state.searchCancelled;
+            lastSearchFailed = state.searchFailed;
+            lastSkippedResults = state.skippedResults;
+            lastMalformedItems = state.malformedItems;
             countLabel.setText(state.countText);
             applyPreviewSearchExpression();
         } finally {
@@ -667,8 +717,7 @@ public final class SearchPlusDialog extends JFrame {
         constraints.gridx = 3;
         searchPanel.add(caseCheck, constraints);
 
-        JButton searchButton = iconButton(new SearchIcon(), "Search");
-        searchButton.addActionListener(event -> runSearch());
+        searchButton.addActionListener(event -> handleSearchButton());
         constraints.gridx = 4;
         searchPanel.add(searchButton, constraints);
 
@@ -904,11 +953,11 @@ public final class SearchPlusDialog extends JFrame {
     }
 
     private void configureFilterControls() {
-        negativeApplyButton.addActionListener(event -> applyNegativeFilter());
-        negativeFilterField.addActionListener(event -> applyNegativeFilter());
+        negativeApplyButton.addActionListener(event -> applyNegativeFilter(true));
+        negativeFilterField.addActionListener(event -> applyNegativeFilter(true));
         negativeAutoCheck.addActionListener(event -> {
             if (negativeAutoCheck.isSelected()) {
-                applyNegativeFilter();
+                applyNegativeFilter(false);
             }
             saveActiveTabState();
         });
@@ -985,17 +1034,33 @@ public final class SearchPlusDialog extends JFrame {
 
             private void applyIfAuto() {
                 if (!restoringTabState && negativeAutoCheck.isSelected()) {
-                    applyNegativeFilter();
+                    applyNegativeFilter(false);
                 }
             }
         };
     }
 
-    private void applyNegativeFilter() {
+    private void applyNegativeFilter(boolean showErrorDialog) {
         if (restoringTabState) {
             return;
         }
-        activeNegativeFilter = negativeFilterField.getText();
+        String candidate = negativeFilterField.getText();
+        try {
+            searchEngine.prepare(buildNegativeFilterOptions(candidate));
+            negativeFilterField.setToolTipText(null);
+        } catch (IllegalArgumentException exception) {
+            negativeFilterField.setToolTipText(exception.getMessage());
+            if (showErrorDialog) {
+                JOptionPane.showMessageDialog(
+                        this,
+                        "Invalid negative filter: " + exception.getMessage(),
+                        "Search++",
+                        JOptionPane.ERROR_MESSAGE
+                );
+            }
+            return;
+        }
+        activeNegativeFilter = candidate;
         applyCurrentFilters();
     }
 
@@ -1086,9 +1151,16 @@ public final class SearchPlusDialog extends JFrame {
     }
 
     private void runSearch() {
+        SwingWorker<Void, SearchResult> runningWorker = currentWorker;
+        if (runningWorker != null && !runningWorker.isDone()) {
+            return;
+        }
+
         SearchOptions options;
+        SearchEngine.PreparedSearch preparedSearch;
         try {
             options = buildQueryOptions();
+            preparedSearch = searchEngine.prepare(options);
         } catch (RuntimeException exception) {
             JOptionPane.showMessageDialog(this, "Invalid search: " + exception.getMessage(), "Search++", JOptionPane.ERROR_MESSAGE);
             return;
@@ -1100,43 +1172,93 @@ public final class SearchPlusDialog extends JFrame {
         tableModel.setRowCount(0);
         allResults = new ArrayList<>();
         currentResults = new ArrayList<>();
+        lastSearchCancelled = false;
+        lastSearchFailed = false;
+        lastSkippedResults = 0;
+        lastMalformedItems = 0;
         clearPreview();
         countLabel.setText("Searching... 0 results");
+        showSearchButtonRunning();
+        SearchPlusTabState searchTab = tabStates.get(activeTabIndex);
+        long searchRunId = nextSearchRunId++;
+        searchTab.searchRunId = searchRunId;
         saveActiveTabState();
 
+        AtomicBoolean cancellationRequested = new AtomicBoolean();
+        currentCancellation = cancellationRequested;
         SwingWorker<Void, SearchResult> worker = new SwingWorker<>() {
+            private int skippedResults;
+            private int malformedItems;
+            private String failurePhase = "unknown";
+            private long failureHeapUsedMiB = -1;
+            private long failureHeapCommittedMiB = -1;
+            private long failureHeapMaxMiB = -1;
+
             @Override
             protected Void doInBackground() {
-                for (HttpExchange exchange : collectSources(options)) {
-                    if (isCancelled()) {
-                        break;
+                currentSearchThread = Thread.currentThread();
+                try {
+                    malformedItems = sourceScanner.scan(
+                            options,
+                            preparedSearch,
+                            cancellationRequested::get,
+                            this::publishMatch
+                    );
+                    return null;
+                } catch (RuntimeException | Error failure) {
+                    captureFailureContext();
+                    throw failure;
+                } finally {
+                    if (currentSearchThread == Thread.currentThread()) {
+                        currentSearchThread = null;
                     }
-                    try {
-                        if (searchEngine.matches(exchange, options)) {
-                            publish(searchEngine.toResult(exchange));
-                        }
-                    } catch (RuntimeException exception) {
-                        logSearchWarning("Skipped malformed search item", exception);
+                    Thread.interrupted();
+                }
+            }
+
+            private void captureFailureContext() {
+                try {
+                    failurePhase = sourceScanner.activePhase();
+                    Runtime runtime = Runtime.getRuntime();
+                    failureHeapUsedMiB =
+                            (runtime.totalMemory() - runtime.freeMemory()) / (1024L * 1024L);
+                    failureHeapCommittedMiB = runtime.totalMemory() / (1024L * 1024L);
+                    failureHeapMaxMiB = runtime.maxMemory() / (1024L * 1024L);
+                } catch (Throwable ignored) {
+                    // Preserve the original failure, especially OutOfMemoryError.
+                }
+            }
+
+            private boolean publishMatch(HttpExchange exchange) {
+                if (cancellationRequested.get()) {
+                    return false;
+                }
+                try {
+                    publish(searchEngine.toResult(exchange));
+                } catch (RuntimeException exception) {
+                    skippedResults++;
+                    if (skippedResults <= 5) {
+                        logSearchWarning("Skipped Search++ result storage", exception);
+                    } else if (skippedResults == 6) {
+                        logSearchWarning("Further Search++ result-storage warnings suppressed", exception);
                     }
                 }
-                return null;
+                return true;
             }
 
             @Override
             protected void process(List<SearchResult> chunks) {
-                if (currentWorker == this) {
+                if (currentWorker == this && !cancellationRequested.get()) {
                     allResults.addAll(chunks);
-                    appendResults(filterResults(chunks));
-                    saveActiveTabState();
+                    appendResults(filterResults(chunks), false);
                 }
             }
 
             @Override
             protected void done() {
-                if (currentWorker != this) {
-                    return;
-                }
-                boolean cancelled = isCancelled();
+                boolean cancelled = cancellationRequested.get();
+                boolean failed = false;
+                Throwable failureCause = null;
                 try {
                     get();
                 } catch (CancellationException exception) {
@@ -1145,23 +1267,104 @@ public final class SearchPlusDialog extends JFrame {
                     Thread.currentThread().interrupt();
                     cancelled = true;
                 } catch (ExecutionException exception) {
+                    failed = true;
                     Throwable cause = exception.getCause() == null ? exception : exception.getCause();
-                    JOptionPane.showMessageDialog(SearchPlusDialog.this,
-                            "Search failed: " + cause.getMessage(),
-                            "Search++",
-                            JOptionPane.ERROR_MESSAGE);
+                    failureCause = cause;
+                    logSearchFailure(
+                            cause,
+                            failurePhase,
+                            failureHeapUsedMiB,
+                            failureHeapCommittedMiB,
+                            failureHeapMaxMiB
+                    );
                 } finally {
-                    currentWorker = null;
-                    if (currentResults.isEmpty()) {
-                        clearPreview();
+                    if (searchTab.searchRunId == searchRunId) {
+                        int resultCount = currentWorker == this
+                                ? currentResults.size()
+                                : searchTab.currentResults.size();
+                        String finalCountText = searchResultCountText(
+                                resultCount,
+                                cancelled,
+                                failed,
+                                skippedResults,
+                                malformedItems
+                        );
+                        searchTab.searchCancelled = cancelled;
+                        searchTab.searchFailed = failed;
+                        searchTab.skippedResults = skippedResults;
+                        searchTab.malformedItems = malformedItems;
+                        searchTab.countText = finalCountText;
+
+                        if (currentWorker == this) {
+                            currentWorker = null;
+                            lastSearchCancelled = cancelled;
+                            lastSearchFailed = failed;
+                            lastSkippedResults = skippedResults;
+                            lastMalformedItems = malformedItems;
+                            if (currentResults.isEmpty()) {
+                                clearPreview();
+                            }
+                            countLabel.setText(finalCountText);
+                            showSearchButtonIdle();
+                            saveActiveTabState();
+                            if (failureCause != null
+                                    && !cancelled
+                                    && SearchPlusDialog.this.isDisplayable()) {
+                                JOptionPane.showMessageDialog(
+                                        SearchPlusDialog.this,
+                                        "Search failed: " + failureCause.getMessage(),
+                                        "Search++",
+                                        JOptionPane.ERROR_MESSAGE
+                                );
+                            }
+                        } else if (currentWorker == null
+                                && isRealTabIndex(activeTabIndex)
+                                && tabStates.get(activeTabIndex) == searchTab) {
+                            lastSearchCancelled = cancelled;
+                            lastSearchFailed = failed;
+                            lastSkippedResults = skippedResults;
+                            lastMalformedItems = malformedItems;
+                            countLabel.setText(finalCountText);
+                            showSearchButtonIdle();
+                        }
                     }
-                    countLabel.setText(currentResults.size() + " results" + (cancelled ? " (cancelled)" : ""));
-                    saveActiveTabState();
                 }
             }
         };
         currentWorker = worker;
-        worker.execute();
+        searchExecutor.execute(worker);
+    }
+
+    private void handleSearchButton() {
+        SwingWorker<Void, SearchResult> worker = currentWorker;
+        if (worker != null && !worker.isDone()) {
+            requestSearchCancellation();
+        } else {
+            runSearch();
+        }
+    }
+
+    private void requestSearchCancellation() {
+        currentCancellation.set(true);
+        Thread runningThread = currentSearchThread;
+        if (runningThread != null) {
+            runningThread.interrupt();
+        }
+        searchButton.setEnabled(false);
+        searchButton.setToolTipText("Cancelling search...");
+        countLabel.setText("Cancelling... " + currentResults.size() + " results");
+    }
+
+    private void showSearchButtonRunning() {
+        searchButton.setIcon(new CancelIcon());
+        searchButton.setToolTipText("Cancel search");
+        searchButton.setEnabled(true);
+    }
+
+    private void showSearchButtonIdle() {
+        searchButton.setIcon(new SearchIcon());
+        searchButton.setToolTipText("Search");
+        searchButton.setEnabled(true);
     }
 
     private SearchOptions buildQueryOptions() {
@@ -1212,9 +1415,9 @@ public final class SearchPlusDialog extends JFrame {
         );
     }
 
-    private SearchOptions buildNegativeFilterOptions() {
+    private SearchOptions buildNegativeFilterOptions(String query) {
         return new SearchOptions(
-                activeNegativeFilter,
+                query,
                 (SearchMode) modeCombo.getSelectedItem(),
                 regexCheck.isSelected(),
                 caseCheck.isSelected(),
@@ -1238,11 +1441,13 @@ public final class SearchPlusDialog extends JFrame {
 
     private List<SearchResult> filterResults(List<SearchResult> results) {
         SearchOptions filterOptions = buildFilterOptions();
-        SearchOptions negativeOptions = buildNegativeFilterOptions();
-        boolean hideNegativeMatches = !negativeOptions.query().isBlank();
+        boolean hideNegativeMatches = !activeNegativeFilter.isBlank();
+        SearchEngine.PreparedSearch negativeSearch = hideNegativeMatches
+                ? searchEngine.prepare(buildNegativeFilterOptions(activeNegativeFilter))
+                : null;
         return results.stream()
                 .filter(result -> searchEngine.matchesFilters(result.exchange(), filterOptions))
-                .filter(result -> !hideNegativeMatches || !searchEngine.matches(result.exchange(), negativeOptions))
+                .filter(result -> !hideNegativeMatches || !negativeSearch.matches(result.exchange()))
                 .toList();
     }
 
@@ -1256,7 +1461,7 @@ public final class SearchPlusDialog extends JFrame {
         if (currentResults.isEmpty()) {
             clearPreview();
         }
-        countLabel.setText(currentResults.size() + " results");
+        countLabel.setText(activeResultCountText());
         saveActiveTabState();
     }
 
@@ -1306,64 +1511,6 @@ public final class SearchPlusDialog extends JFrame {
                 : Set.of();
     }
 
-    private List<HttpExchange> collectSources(SearchOptions options) {
-        Map<String, HttpExchange> deduped = new LinkedHashMap<>();
-        addAll(deduped, contextExchanges);
-        if (options.includeTarget()) {
-            addSource(deduped, "Target", () -> HttpExchangeFactory.fromRequestResponses("Target", api.siteMap().requestResponses()));
-        }
-        if (options.includeProxy()) {
-            addSource(deduped, "Proxy", () -> HttpExchangeFactory.fromProxyHistory(api.proxy().history()));
-        }
-        if (options.includeRepeater() && repeaterCache != null) {
-            addSource(deduped, "Repeater", () -> HttpExchangeFactory.fromRequestResponses("Repeater", repeaterCache.snapshot()));
-        }
-        if (options.includeOrganizer()) {
-            addSource(deduped, "Organizer", () -> HttpExchangeFactory.fromOrganizerItems(api.organizer().items()));
-        }
-        return new ArrayList<>(deduped.values());
-    }
-
-    private void addSource(Map<String, HttpExchange> deduped, String source, Supplier<List<HttpExchange>> supplier) {
-        try {
-            addAll(deduped, supplier.get());
-        } catch (RuntimeException exception) {
-            logSearchWarning("Unable to read Search++ source " + source, exception);
-        }
-    }
-
-    private void addAll(Map<String, HttpExchange> deduped, List<HttpExchange> exchanges) {
-        if (exchanges == null || exchanges.isEmpty()) {
-            return;
-        }
-        for (HttpExchange exchange : exchanges) {
-            try {
-                if (!matchesContextScope(exchange)) {
-                    continue;
-                }
-                deduped.putIfAbsent(exchange.source() + " " + exchange.method() + " " + exchange.url(), exchange);
-            } catch (RuntimeException exception) {
-                logSearchWarning("Skipped malformed Search++ item", exception);
-            }
-        }
-    }
-
-    private boolean matchesContextScope(HttpExchange exchange) {
-        if (contextScopes.isEmpty()) {
-            return true;
-        }
-        for (SelectionScope scope : contextScopes) {
-            try {
-                if (scope.matchesUrl(exchange.url())) {
-                    return true;
-                }
-            } catch (RuntimeException ignored) {
-                return false;
-            }
-        }
-        return false;
-    }
-
     private void appendResults(List<SearchResult> results) {
         appendResults(results, true);
     }
@@ -1384,7 +1531,7 @@ public final class SearchPlusDialog extends JFrame {
                     exchange.time() == null ? "" : TIME_FORMAT.format(exchange.time())
             });
         }
-        countLabel.setText(currentResults.size() + " results");
+        countLabel.setText(activeResultCountText());
         if (selectFirstResultWhenEmpty && selectFirstResult && !currentResults.isEmpty()) {
             table.setRowSelectionInterval(0, 0);
         }
@@ -1493,7 +1640,7 @@ public final class SearchPlusDialog extends JFrame {
             return;
         }
         if (extractHandler != null && extractHandler.test(requestResponses)) {
-            countLabel.setText(currentResults.size() + " results");
+            countLabel.setText(activeResultCountText());
         }
     }
 
@@ -1505,16 +1652,81 @@ public final class SearchPlusDialog extends JFrame {
         }
     }
 
+    private void logSearchFailure(
+            Throwable failure,
+            String phase,
+            long usedMiB,
+            long committedMiB,
+            long maxMiB
+    ) {
+        try {
+            api.logging().logToError(
+                    "Search++ failed phase=" + phase
+                            + " type=" + failure.getClass().getName()
+                            + " message=" + failure.getMessage()
+                            + " heapUsedMiB=" + usedMiB
+                            + " heapCommittedMiB=" + committedMiB
+                            + " heapMaxMiB=" + maxMiB
+            );
+        } catch (Throwable ignored) {
+            // Preserve the original failure, including OutOfMemoryError.
+        }
+    }
+
+    private String searchResultCountText(
+            int resultCount,
+            boolean cancelled,
+            boolean failed,
+            int skippedResults,
+            int malformedItems
+    ) {
+        List<String> notes = new ArrayList<>(4);
+        if (failed) {
+            notes.add("failed");
+        }
+        if (cancelled) {
+            notes.add("cancelled");
+        }
+        if (skippedResults > 0) {
+            notes.add(skippedResults + " storage skipped");
+        }
+        if (malformedItems > 0) {
+            notes.add(malformedItems + " malformed checks skipped");
+        }
+        return resultCount + " results" + (notes.isEmpty() ? "" : " (" + String.join(", ", notes) + ")");
+    }
+
+    private String activeResultCountText() {
+        if (currentWorker == null) {
+            return searchResultCountText(
+                    currentResults.size(),
+                    lastSearchCancelled,
+                    lastSearchFailed,
+                    lastSkippedResults,
+                    lastMalformedItems
+            );
+        }
+        return (currentCancellation.get() ? "Cancelling... " : "Searching... ")
+                + currentResults.size()
+                + " results";
+    }
+
     private void cancelRunningSearch() {
         SwingWorker<Void, SearchResult> worker = currentWorker;
         currentWorker = null;
         if (worker != null && !worker.isDone()) {
-            worker.cancel(true);
+            currentCancellation.set(true);
+            Thread runningThread = currentSearchThread;
+            if (runningThread != null) {
+                runningThread.interrupt();
+            }
         }
+        showSearchButtonIdle();
     }
 
     private void closeOwnedWindows() {
         cancelRunningSearch();
+        searchExecutor.shutdownNow();
     }
 
     private void copySelectedUrl() {
@@ -1539,6 +1751,35 @@ public final class SearchPlusDialog extends JFrame {
             if (row < 0 || column < 0 || column >= CONTROL_GRID_COLUMNS || span <= 0 || column + span > CONTROL_GRID_COLUMNS) {
                 throw new IllegalArgumentException("Invalid Search++ control grid cell");
             }
+        }
+    }
+
+    private record SourceSelection(
+            boolean target,
+            boolean proxy,
+            boolean repeater,
+            boolean organizer
+    ) {
+    }
+
+    private record SearchContextPolicy(SourceSelection sourceSelection, String label) {
+        private static SearchContextPolicy from(int itemCount, int scopeCount) {
+            if (scopeCount > 0) {
+                return new SearchContextPolicy(
+                        new SourceSelection(true, false, false, false),
+                        "Scope: " + scopeCount + (scopeCount == 1 ? " selection" : " selections")
+                );
+            }
+            if (itemCount > 0) {
+                return new SearchContextPolicy(
+                        new SourceSelection(false, false, false, false),
+                        "Context: " + itemCount + (itemCount == 1 ? " item" : " items")
+                );
+            }
+            return new SearchContextPolicy(
+                    new SourceSelection(true, true, true, true),
+                    "Context: 0 items"
+            );
         }
     }
 
@@ -1767,6 +2008,32 @@ public final class SearchPlusDialog extends JFrame {
                 g.setStroke(new BasicStroke(2.0F, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
                 g.drawOval(x + 2, y + 2, 8, 8);
                 g.drawLine(x + 9, y + 9, x + 14, y + 14);
+            } finally {
+                g.dispose();
+            }
+        }
+    }
+
+    private static final class CancelIcon implements Icon {
+        @Override
+        public int getIconWidth() {
+            return 16;
+        }
+
+        @Override
+        public int getIconHeight() {
+            return 16;
+        }
+
+        @Override
+        public void paintIcon(java.awt.Component component, Graphics graphics, int x, int y) {
+            Graphics2D g = (Graphics2D) graphics.create();
+            try {
+                g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+                g.setColor(new Color(180, 55, 55));
+                g.setStroke(new BasicStroke(2.2F, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
+                g.drawLine(x + 3, y + 3, x + 13, y + 13);
+                g.drawLine(x + 13, y + 3, x + 3, y + 13);
             } finally {
                 g.dispose();
             }

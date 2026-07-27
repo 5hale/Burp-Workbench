@@ -14,6 +14,7 @@ import burp.api.montoya.http.message.HttpRequestResponse;
 import burp.api.montoya.http.message.HttpMessage;
 import burp.api.montoya.http.message.requests.HttpRequest;
 import burp.api.montoya.http.message.responses.HttpResponse;
+import burp.api.montoya.proxy.ProxyHttpRequestResponse;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.Charset;
@@ -21,12 +22,19 @@ import java.nio.charset.StandardCharsets;
 import java.lang.reflect.Proxy;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SearchEngineTest {
     private final SearchEngine engine = new SearchEngine();
+    private final AtomicInteger messageByteCopies = new AtomicInteger();
+    private final AtomicInteger tempFileCopies = new AtomicInteger();
 
     @Test
     void searchesUtf8KoreanText() {
@@ -43,10 +51,214 @@ class SearchEngineTest {
     }
 
     @Test
+    void searchesEucKrKoreanTextFallback() {
+        List<HttpExchange> exchanges = List.of(exchange(response("text/plain", "한글 검색".getBytes(Charset.forName("EUC-KR")))));
+
+        assertEquals(1, engine.search(exchanges, options("한글", SearchMode.TEXT)).size());
+    }
+
+    @Test
+    void mixedKoreanAndAsciiCaseSearchUsesTheBytePath() {
+        List<HttpExchange> exchanges = List.of(exchange(response(
+                "text/plain; charset=utf-8",
+                "한글 aBc 검색".getBytes(StandardCharsets.UTF_8)
+        )));
+
+        messageByteCopies.set(0);
+        assertEquals(1, engine.search(exchanges, options("한글 ABC", SearchMode.TEXT)).size());
+        assertEquals(0, messageByteCopies.get());
+    }
+
+    @Test
+    void asciiCaseFoldingDoesNotAlterMs949KoreanBytesOrBoundaries() {
+        Charset ms949 = Charset.forName("MS949");
+        List<HttpExchange> trailByteCollision = List.of(exchange(response(
+                "text/plain; charset=ms949",
+                "륾 a".getBytes(ms949)
+        )));
+        List<HttpExchange> boundaryCollision = List.of(exchange(response(
+                "text/plain; charset=ms949",
+                "륾륚".getBytes(ms949)
+        )));
+        List<HttpExchange> fallbackCharsetCollision = List.of(exchange(response(
+                "text/plain; charset=ms949",
+                "륾한".getBytes(ms949)
+        )));
+
+        assertEquals(
+                0,
+                engine.search(trailByteCollision, options("륚 A", SearchMode.TEXT)).size()
+        );
+        assertEquals(
+                0,
+                engine.search(boundaryCollision, options("A륚", SearchMode.TEXT)).size()
+        );
+        assertEquals(
+                0,
+                engine.search(fallbackCharsetCollision, options("A한", SearchMode.TEXT)).size()
+        );
+    }
+
+    @Test
+    void mixedKoreanAndAsciiCaseSearchStillMatchesMs949() {
+        Charset ms949 = Charset.forName("MS949");
+        List<HttpExchange> exchanges = List.of(exchange(response(
+                "text/plain; charset=ms949",
+                "한글 aBc 검색".getBytes(ms949)
+        )));
+
+        assertEquals(
+                1,
+                engine.search(exchanges, options("한글 ABC", SearchMode.TEXT)).size()
+        );
+    }
+
+    @Test
+    void interruptedDecodedSearchStopsPromptly() {
+        SearchOptions regexOptions = new SearchOptions(
+                "missing.*pattern",
+                SearchMode.TEXT,
+                true,
+                false,
+                false,
+                true,
+                true,
+                true,
+                true,
+                false,
+                false,
+                false,
+                false,
+                true,
+                Set.of(),
+                Set.of(),
+                Set.of()
+        );
+        HttpExchange exchange = exchange(response("text/plain", new byte[64 * 1024]));
+
+        Thread.currentThread().interrupt();
+        try {
+            assertThrows(
+                    CancellationException.class,
+                    () -> engine.prepare(regexOptions).matches(exchange)
+            );
+        } finally {
+            Thread.interrupted();
+        }
+    }
+
+    @Test
+    void invalidRegexIsRejectedBeforeScanning() {
+        SearchOptions invalidRegex = new SearchOptions(
+                "[unterminated",
+                SearchMode.TEXT,
+                true,
+                false,
+                false,
+                true,
+                true,
+                true,
+                true,
+                false,
+                false,
+                false,
+                false,
+                true,
+                Set.of(),
+                Set.of(),
+                Set.of()
+        );
+
+        assertThrows(IllegalArgumentException.class, () -> engine.prepare(invalidRegex));
+    }
+
+    @Test
     void searchesHexBytes() {
         List<HttpExchange> exchanges = List.of(exchange(response("application/octet-stream", new byte[]{0x41, 0x42, 0x43, 0x44})));
 
         assertEquals(1, engine.search(exchanges, options("42 43", SearchMode.HEX)).size());
+    }
+
+    @Test
+    void literalAndHexSearchesDoNotCopyMessageByteArrays() {
+        byte[] body = new byte[64 * 1024];
+        byte[] marker = "needle".getBytes(StandardCharsets.US_ASCII);
+        System.arraycopy(marker, 0, body, body.length - marker.length, marker.length);
+        List<HttpExchange> exchanges = List.of(exchange(response("application/octet-stream", body)));
+
+        messageByteCopies.set(0);
+        assertEquals(1, engine.search(exchanges, options("needle", SearchMode.TEXT)).size());
+        assertEquals(0, messageByteCopies.get());
+
+        messageByteCopies.set(0);
+        assertEquals(1, engine.search(exchanges, options("6e 65 65 64 6c 65", SearchMode.HEX)).size());
+        assertEquals(0, messageByteCopies.get());
+    }
+
+    @Test
+    void matchedResultsAreMovedToTempFileStorage() {
+        List<HttpExchange> exchanges = List.of(exchange(response("text/plain", bytes("needle"))));
+
+        tempFileCopies.set(0);
+        assertEquals(1, engine.search(exchanges, options("needle", SearchMode.TEXT)).size());
+
+        assertEquals(1, tempFileCopies.get());
+    }
+
+    @Test
+    void resultRetainsTheTempFileBackedExchange() {
+        HttpExchange storedExchange = exchange(response("text/plain", bytes("needle")));
+        HttpRequestResponse stored = storedExchange.requestResponse();
+        HttpRequestResponse source = proxy(HttpRequestResponse.class, (method, args) -> switch (method.getName()) {
+            case "request" -> stored.request();
+            case "response" -> stored.response();
+            case "hasResponse" -> true;
+            case "httpService" -> stored.httpService();
+            case "copyToTempFile" -> stored;
+            default -> defaultValue(method.getReturnType());
+        });
+
+        SearchResult result = engine.toResult(new HttpExchange("test", source, null));
+
+        assertSame(stored, result.exchange().requestResponse());
+    }
+
+    @Test
+    void tempFileStorageFailureDoesNotRetainTheSourceResult() {
+        HttpExchange sourceExchange = exchange(response("text/plain", bytes("needle")));
+        HttpRequestResponse source = proxy(HttpRequestResponse.class, (method, args) -> switch (method.getName()) {
+            case "request" -> sourceExchange.requestResponse().request();
+            case "response" -> sourceExchange.requestResponse().response();
+            case "hasResponse" -> true;
+            case "httpService" -> sourceExchange.requestResponse().httpService();
+            case "copyToTempFile" -> null;
+            default -> defaultValue(method.getReturnType());
+        });
+
+        assertThrows(
+                IllegalStateException.class,
+                () -> engine.toResult(new HttpExchange("test", source, null))
+        );
+    }
+
+    @Test
+    void asciiWholeMessageTextSearchCanUseMontoyaNativeFiltering() {
+        SearchEngine.PreparedSearch prepared = engine.prepare(options("search text", SearchMode.TEXT));
+        HttpRequestResponse requestResponse = proxy(HttpRequestResponse.class, (method, args) ->
+                "contains".equals(method.getName()) && "search text".equals(args[0]));
+        ProxyHttpRequestResponse proxyItem = proxy(ProxyHttpRequestResponse.class, (method, args) ->
+                "contains".equals(method.getName()) && "search text".equals(args[0]));
+
+        assertTrue(prepared.supportsNativeWholeMessageSearch());
+        assertTrue(prepared.matchesNativeQuery(requestResponse));
+        assertTrue(prepared.matchesNativeQuery(proxyItem));
+    }
+
+    @Test
+    void koreanWholeMessageSearchUsesCharsetAwareMatcher() {
+        SearchEngine.PreparedSearch prepared = engine.prepare(options("한글 검색", SearchMode.TEXT));
+
+        assertFalse(prepared.supportsNativeWholeMessageSearch());
     }
 
     @Test
@@ -279,10 +491,11 @@ class SearchEngineTest {
     @Test
     void malformedUrlDoesNotAbortSearch() {
         List<HttpExchange> exchanges = List.of(
-                exchange("z5N6o6SqQ_yxbzUGR-eUgw==:HbTYZKT3jDOIR6OGjTmFkXe", response(200, "text/plain", bytes("needle")))
+                exchange("z5N6o6SqQ_yxbzUGR-eUgw==:HbTYZKT3jDOIR6OGjTmFkXe", response(200, "text/plain", bytes("needle"))),
+                exchange("https://example.com/callback:6761", response(200, "text/plain", bytes("needle")))
         );
 
-        assertEquals(1, engine.search(exchanges, options("needle", SearchMode.TEXT)).size());
+        assertEquals(2, engine.search(exchanges, options("needle", SearchMode.TEXT)).size());
     }
 
     private SearchOptions options(String query, SearchMode mode) {
@@ -319,14 +532,19 @@ class SearchEngineTest {
             case "secure" -> true;
             default -> defaultValue(method.getReturnType());
         });
-        HttpRequestResponse requestResponse = proxy(HttpRequestResponse.class, (method, args) -> switch (method.getName()) {
+        HttpRequestResponse[] requestResponseHolder = new HttpRequestResponse[1];
+        requestResponseHolder[0] = proxy(HttpRequestResponse.class, (method, args) -> switch (method.getName()) {
             case "request" -> request;
             case "response" -> response;
             case "hasResponse" -> true;
             case "httpService" -> service;
+            case "copyToTempFile" -> {
+                tempFileCopies.incrementAndGet();
+                yield requestResponseHolder[0];
+            }
             default -> defaultValue(method.getReturnType());
         });
-        return new HttpExchange("test", requestResponse, null);
+        return new HttpExchange("test", requestResponseHolder[0], null);
     }
 
     private HttpResponse response(String contentType, byte[] body) {
@@ -431,11 +649,45 @@ class SearchEngineTest {
 
     private ByteArray byteArray(byte[] bytes) {
         return proxy(ByteArray.class, (method, args) -> switch (method.getName()) {
-            case "getBytes" -> bytes;
+            case "getByte" -> bytes[(int) args[0]];
+            case "getBytes" -> {
+                messageByteCopies.incrementAndGet();
+                yield bytes.clone();
+            }
+            case "indexOf" -> indexOf(bytes, args);
             case "length" -> bytes.length;
             case "toString" -> new String(bytes, StandardCharsets.ISO_8859_1);
             default -> defaultValue(method.getReturnType());
         });
+    }
+
+    private int indexOf(byte[] bytes, Object[] args) {
+        byte[] needle = args[0] instanceof ByteArray byteArray
+                ? byteArray.getBytes()
+                : String.valueOf(args[0]).getBytes(StandardCharsets.ISO_8859_1);
+        boolean caseSensitive = args.length < 2 || (boolean) args[1];
+        int start = args.length < 3 ? 0 : (int) args[2];
+        int end = args.length < 4 ? bytes.length : (int) args[3];
+        int lastStart = end - needle.length;
+        for (int index = start; index <= lastStart; index++) {
+            boolean matched = true;
+            for (int needleIndex = 0; needleIndex < needle.length; needleIndex++) {
+                byte actual = bytes[index + needleIndex];
+                byte expected = needle[needleIndex];
+                if (caseSensitive ? actual != expected : asciiLower(actual) != asciiLower(expected)) {
+                    matched = false;
+                    break;
+                }
+            }
+            if (matched) {
+                return index;
+            }
+        }
+        return -1;
+    }
+
+    private byte asciiLower(byte value) {
+        return value >= 'A' && value <= 'Z' ? (byte) (value + ('a' - 'A')) : value;
     }
 
     @SuppressWarnings("unchecked")

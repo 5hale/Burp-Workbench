@@ -38,7 +38,9 @@ public final class SearchPlusContextMenuProvider implements ContextMenuItemsProv
         }
         List<HttpRequestResponse> selectedItems = selectedItems(event);
         boolean includeSubtree = event.isFrom(InvocationType.SITE_MAP_TREE);
-        List<HttpRequestResponse> contextItems = selectionResolver.resolve(selectedItems, includeSubtree);
+        List<HttpRequestResponse> contextItems = includeSubtree
+                ? List.of()
+                : selectionResolver.resolve(selectedItems, false);
         List<SelectionScope> contextScopes = includeSubtree ? SelectionResolver.scopesFor(selectedItems) : List.of();
         JMenuItem searchItem = new JMenuItem("Search++");
         searchItem.addActionListener(e -> SearchPlusDialog.open(api, contextItems, contextScopes, repeaterCache, this::extract));

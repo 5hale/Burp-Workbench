@@ -37,6 +37,11 @@ final class SearchPlusTabState {
     List<SearchResult> currentResults = List.of();
     int[] selectedModelRows = new int[0];
     String countText = "0 results";
+    long searchRunId;
+    boolean searchCancelled;
+    boolean searchFailed;
+    int skippedResults;
+    int malformedItems;
 
     private SearchPlusTabState(String title) {
         rename(title);

@@ -1,33 +1,30 @@
 package com.burpworkbench.tests;
 
-import com.burpworkbench.core.http.HttpExchange;
 import com.burpworkbench.core.http.HttpExchangeFactory;
 
 import burp.api.montoya.proxy.ProxyHttpRequestResponse;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Proxy;
-import java.util.List;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 
 class HttpExchangeFactoryTest {
     @Test
-    void proxyHistorySkipsMalformedItemsWithoutThrowing() {
-        ProxyHttpRequestResponse malformed = proxy(ProxyHttpRequestResponse.class, (method, args) -> switch (method.getName()) {
-            case "finalRequest" -> throwIllegalUrl();
+    void returnsNullForMissingProxyItem() {
+        assertNull(HttpExchangeFactory.requestResponseFromProxyItem(null));
+    }
+
+    @Test
+    void returnsNullWhenProxyItemHasNoUsableRequest() {
+        ProxyHttpRequestResponse item = proxy(ProxyHttpRequestResponse.class, (method, args) -> switch (method.getName()) {
+            case "finalRequest" -> null;
             case "request" -> null;
             case "hasResponse" -> false;
             default -> defaultValue(method.getReturnType());
         });
 
-        List<HttpExchange> exchanges = HttpExchangeFactory.fromProxyHistory(List.of(malformed));
-
-        assertEquals(0, exchanges.size());
-    }
-
-    private Object throwIllegalUrl() {
-        throw new IllegalArgumentException("Illegal char <:> at index 24: z5N6o6SqQ_yxbzUGR-eUgw==:HbTYZKT3jDOIR6OGjTmFkXe");
+        assertNull(HttpExchangeFactory.requestResponseFromProxyItem(item));
     }
 
     @SuppressWarnings("unchecked")

@@ -51,7 +51,7 @@ Owns context-menu extraction, planning, duplicate detection, decoded body saving
 
 ### Search++
 
-Owns top menu/context menu entry, advanced search window, source collection, post-search filters, negative match filtering, and request/response preview. Result extraction calls `ExtractionHandler` only.
+Owns top menu/context menu entry, advanced search window, post-search filters, negative match filtering, and request/response preview. `SearchSourceScanner` owns hash-partitioned source traversal, scope filtering, deduplication, and cancellation checks; `SearchEngine` owns prepared query matching. Result extraction calls `ExtractionHandler` only.
 
 ## Future Modules
 
