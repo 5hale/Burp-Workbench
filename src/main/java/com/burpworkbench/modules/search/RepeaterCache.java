@@ -7,7 +7,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-public final class RepeaterCache {
+final class RepeaterCache {
     private final Map<String, HttpRequestResponse> entries = new LinkedHashMap<>();
 
     public synchronized void add(HttpRequestResponse item) {
@@ -16,16 +16,12 @@ public final class RepeaterCache {
         }
     }
 
-    public synchronized void addAll(List<HttpRequestResponse> items) {
-        if (items != null) {
-            for (HttpRequestResponse item : items) {
-                add(item);
-            }
-        }
-    }
-
     public synchronized List<HttpRequestResponse> snapshot() {
         return new ArrayList<>(entries.values());
+    }
+
+    public synchronized void clear() {
+        entries.clear();
     }
 
     private String deduplicationKey(HttpRequestResponse item) {

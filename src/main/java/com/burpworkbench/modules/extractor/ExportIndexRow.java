@@ -1,6 +1,6 @@
 package com.burpworkbench.modules.extractor;
 
-public record ExportIndexRow(
+record ExportIndexRow(
         String action,
         String method,
         String url,
@@ -14,4 +14,3 @@ public record ExportIndexRow(
         String reason
 ) {
 }
-

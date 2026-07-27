@@ -1,6 +1,6 @@
 package com.burpworkbench.modules.extractor;
 
-public final class NoOpExportProgressListener implements ExportProgressListener {
+final class NoOpExportProgressListener implements ExportProgressListener {
     @Override
     public boolean isCancelled() {
         return false;
@@ -10,4 +10,3 @@ public final class NoOpExportProgressListener implements ExportProgressListener 
     public void onProgress(ExportProgress progress) {
     }
 }
-

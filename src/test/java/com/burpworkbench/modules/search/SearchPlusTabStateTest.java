@@ -2,7 +2,6 @@ package com.burpworkbench.modules.search;
 
 import org.junit.jupiter.api.Test;
 
-import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -34,17 +33,17 @@ class SearchPlusTabStateTest {
     }
 
     @Test
-    void setResultsCopiesResultLists() {
+    void tabOwnsCanonicalResultsAndPrimitiveVisibleView() {
         SearchPlusTabState state = SearchPlusTabState.initial(1);
         SearchResult result = new SearchResult(null, "text", 4);
-        List<SearchResult> allResults = new ArrayList<>(List.of(result));
-        List<SearchResult> currentResults = new ArrayList<>(List.of(result));
+        SearchResultTableModel model = new SearchResultTableModel();
 
-        state.setResults(allResults, currentResults);
-        allResults.clear();
-        currentResults.clear();
+        state.allResults.add(result);
+        state.visibleResults.addVisibleIndices(new int[]{0});
+        model.bind(state.visibleResults);
 
         assertEquals(1, state.allResults.size());
-        assertEquals(1, state.currentResults.size());
+        assertEquals(1, state.visibleResults.size());
+        assertEquals(1, model.resultCount());
     }
 }

@@ -1,7 +1,5 @@
 package com.burpworkbench.modules.extractor;
 
-import com.burpworkbench.core.util.Hashes;
-
 import java.net.URI;
 import java.net.URLDecoder;
 import java.nio.charset.Charset;
@@ -14,7 +12,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.regex.Pattern;
 
-public final class UrlPathMapper {
+final class UrlPathMapper {
     private static final Pattern WINDOWS_UNSAFE_CHARS = Pattern.compile("[\\\\/:*?\"<>|\\p{Cntrl}]");
     private static final Set<String> WINDOWS_RESERVED_NAMES = Set.of(
             "CON", "PRN", "AUX", "NUL",

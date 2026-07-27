@@ -6,19 +6,34 @@ import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.JProgressBar;
 import javax.swing.SwingUtilities;
+import javax.swing.WindowConstants;
 import java.awt.BorderLayout;
 import java.awt.Dimension;
+import java.awt.event.WindowAdapter;
+import java.awt.event.WindowEvent;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
-public final class ExportProgressDialog extends JDialog implements ExportProgressListener {
+final class ExportProgressDialog extends JDialog implements ExportProgressListener {
     private final JProgressBar progressBar = new JProgressBar();
     private final JLabel countsLabel = new JLabel("Preparing...");
     private final JLabel currentLabel = new JLabel(" ");
     private final JButton cancelButton = new JButton("Cancel");
+    private final AtomicReference<ExportProgress> pendingProgress = new AtomicReference<>();
+    private final AtomicBoolean updateScheduled = new AtomicBoolean();
     private volatile boolean cancelled;
+    private volatile boolean closed;
 
     public ExportProgressDialog(String title) {
         super((JDialog) null, title, false);
         setLayout(new BorderLayout(8, 8));
+        setDefaultCloseOperation(WindowConstants.DO_NOTHING_ON_CLOSE);
+        addWindowListener(new WindowAdapter() {
+            @Override
+            public void windowClosing(WindowEvent event) {
+                requestCancellation();
+            }
+        });
 
         progressBar.setStringPainted(true);
 
@@ -27,11 +42,7 @@ public final class ExportProgressDialog extends JDialog implements ExportProgres
         center.add(countsLabel, BorderLayout.CENTER);
         center.add(currentLabel, BorderLayout.SOUTH);
 
-        cancelButton.addActionListener(event -> {
-            cancelled = true;
-            cancelButton.setEnabled(false);
-            cancelButton.setText("Cancelling...");
-        });
+        cancelButton.addActionListener(event -> requestCancellation());
 
         add(center, BorderLayout.CENTER);
         add(cancelButton, BorderLayout.SOUTH);
@@ -41,11 +52,24 @@ public final class ExportProgressDialog extends JDialog implements ExportProgres
     }
 
     public void open() {
-        SwingUtilities.invokeLater(() -> setVisible(true));
+        SwingUtilities.invokeLater(() -> {
+            if (!cancelled && !closed) {
+                setVisible(true);
+            }
+        });
     }
 
     public void close() {
+        closed = true;
         SwingUtilities.invokeLater(this::dispose);
+    }
+
+    public void requestCancellation() {
+        cancelled = true;
+        SwingUtilities.invokeLater(() -> {
+            cancelButton.setEnabled(false);
+            cancelButton.setText("Cancelling...");
+        });
     }
 
     @Override
@@ -55,7 +79,19 @@ public final class ExportProgressDialog extends JDialog implements ExportProgres
 
     @Override
     public void onProgress(ExportProgress progress) {
-        SwingUtilities.invokeLater(() -> {
+        pendingProgress.set(progress);
+        scheduleProgressUpdate();
+    }
+
+    private void scheduleProgressUpdate() {
+        if (updateScheduled.compareAndSet(false, true)) {
+            SwingUtilities.invokeLater(this::applyLatestProgress);
+        }
+    }
+
+    private void applyLatestProgress() {
+        ExportProgress progress = pendingProgress.getAndSet(null);
+        if (progress != null && isDisplayable()) {
             progressBar.setMaximum(Math.max(progress.total(), 1));
             progressBar.setValue(Math.min(progress.processed(), progressBar.getMaximum()));
             progressBar.setString(progress.processed() + " / " + progress.total());
@@ -73,7 +109,11 @@ public final class ExportProgressDialog extends JDialog implements ExportProgres
                 cancelButton.setEnabled(false);
                 cancelButton.setText("Cancelled");
             }
-        });
+        }
+        updateScheduled.set(false);
+        if (pendingProgress.get() != null) {
+            scheduleProgressUpdate();
+        }
     }
 
     private String escape(String value) {
@@ -83,4 +123,3 @@ public final class ExportProgressDialog extends JDialog implements ExportProgres
                 .replace(">", "&gt;");
     }
 }
-

@@ -1,7 +1,5 @@
 package com.burpworkbench.modules.search;
 
-import com.burpworkbench.core.http.HttpExchange;
-import com.burpworkbench.core.http.HttpExchangeFactory;
 import com.burpworkbench.core.selection.SelectionScope;
 
 import burp.api.montoya.MontoyaApi;
@@ -14,6 +12,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BooleanSupplier;
 import java.util.function.Function;
 import java.util.function.IntFunction;
@@ -31,11 +30,14 @@ final class SearchSourceScanner {
     static final int PARTITION_COUNT = 32;
 
     private final MontoyaApi api;
-    private final List<HttpExchange> contextExchanges;
-    private final List<SelectionScope> contextScopes;
+    private volatile List<HttpExchange> contextExchanges;
+    private volatile List<SelectionScope> contextScopes;
     private final RepeaterCache repeaterCache;
     private final Function<ProxyHttpRequestResponse, HttpRequestResponse> proxyRequestResponseFactory;
+    private final AtomicLong scannedItems = new AtomicLong();
+    private final AtomicLong matchedItems = new AtomicLong();
     private final AtomicInteger malformedItems = new AtomicInteger();
+    private final AtomicInteger regexTimeoutItems = new AtomicInteger();
     private volatile String activePhase = "idle";
 
     SearchSourceScanner(
@@ -67,21 +69,40 @@ final class SearchSourceScanner {
         this.proxyRequestResponseFactory = proxyRequestResponseFactory;
     }
 
-    int scan(
+    ScanStatistics scan(
             SearchOptions options,
             SearchEngine.PreparedSearch preparedSearch,
             BooleanSupplier cancellationRequested,
             Predicate<HttpExchange> matchVisitor
     ) {
         BooleanSupplier cancellation = cancellationRequested == null ? () -> false : cancellationRequested;
+        scannedItems.set(0);
+        matchedItems.set(0);
         malformedItems.set(0);
+        regexTimeoutItems.set(0);
         boolean completed = scanSources(options, preparedSearch, cancellation, matchVisitor);
-        activePhase = completed ? "complete" : "cancelled";
-        return malformedItems.get();
+        if (completed) {
+            activePhase = "complete";
+        }
+        return currentStatistics();
+    }
+
+    void clearRetainedContext() {
+        contextExchanges = List.of();
+        contextScopes = List.of();
     }
 
     String activePhase() {
         return activePhase;
+    }
+
+    ScanStatistics currentStatistics() {
+        return new ScanStatistics(
+                scannedItems.get(),
+                matchedItems.get(),
+                malformedItems.get(),
+                regexTimeoutItems.get()
+        );
     }
 
     private boolean scanSources(
@@ -179,11 +200,15 @@ final class SearchSourceScanner {
                 if (requestResponse == null) {
                     return false;
                 }
+                scannedItems.incrementAndGet();
                 HttpExchange exchange = new HttpExchange("Target", requestResponse, null);
                 return preparedSearch.supportsNativeWholeMessageSearch()
                         ? preparedSearch.matchesFilters(exchange)
                         && preparedSearch.matchesNativeQuery(requestResponse)
                         : preparedSearch.matches(exchange);
+            } catch (SearchItemTimeoutException exception) {
+                recordRegexTimeout(exception);
+                return false;
             } catch (CancellationException exception) {
                 throw exception;
             } catch (RuntimeException exception) {
@@ -206,6 +231,7 @@ final class SearchSourceScanner {
                         || (!contextScopes.isEmpty() && !matchesContextScope(proxyItemUrl(item)))) {
                     return false;
                 }
+                scannedItems.incrementAndGet();
                 boolean nativeSearch = preparedSearch.supportsNativeWholeMessageSearch();
                 if (nativeSearch && !preparedSearch.hasExchangeFilters()) {
                     return preparedSearch.matchesNativeQuery(item);
@@ -220,6 +246,9 @@ final class SearchSourceScanner {
                         ? preparedSearch.matchesFilters(exchange)
                         && preparedSearch.matchesNativeQuery(item)
                         : preparedSearch.matches(exchange);
+            } catch (SearchItemTimeoutException exception) {
+                recordRegexTimeout(exception);
+                return false;
             } catch (CancellationException exception) {
                 throw exception;
             } catch (RuntimeException exception) {
@@ -347,6 +376,9 @@ final class SearchSourceScanner {
         for (T item : items) {
             try {
                 ensureNotCancelled(cancellation);
+                if (candidateState == CandidateState.RAW) {
+                    scannedItems.incrementAndGet();
+                }
                 HttpExchange exchange = mapper.apply(item);
                 if (exchange == null) {
                     continue;
@@ -355,17 +387,20 @@ final class SearchSourceScanner {
                         && !matchesContextScope(exchange.url())) {
                     continue;
                 }
-                if (candidateState == CandidateState.RAW
-                        && !preparedSearch.matches(exchange)) {
-                    continue;
-                }
                 ExchangeKey key = new ExchangeKey(exchange.method(), exchange.url());
                 if (!seen.add(key)) {
                     continue;
                 }
+                if (candidateState == CandidateState.RAW
+                        && !preparedSearch.matches(exchange)) {
+                    continue;
+                }
+                matchedItems.incrementAndGet();
                 if (!visitor.test(exchange)) {
                     return false;
                 }
+            } catch (SearchItemTimeoutException exception) {
+                recordRegexTimeout(exception);
             } catch (CancellationException exception) {
                 throw exception;
             } catch (RuntimeException exception) {
@@ -431,6 +466,26 @@ final class SearchSourceScanner {
             logWarning("Skipped malformed Search++ item at " + activePhase, exception);
         } else if (count == 6) {
             logWarning("Further malformed Search++ item warnings suppressed at " + activePhase, exception);
+        }
+    }
+
+    private void recordRegexTimeout(SearchItemTimeoutException exception) {
+        int count = regexTimeoutItems.incrementAndGet();
+        if (count <= 5) {
+            logWarning("Skipped Search++ regex item after timeout at " + activePhase, exception);
+        } else if (count == 6) {
+            logWarning("Further Search++ regex timeout warnings suppressed at " + activePhase, exception);
+        }
+    }
+
+    record ScanStatistics(
+            long scannedItems,
+            long matchedItems,
+            int malformedItems,
+            int regexTimeoutItems
+    ) {
+        boolean incomplete() {
+            return regexTimeoutItems > 0;
         }
     }
 

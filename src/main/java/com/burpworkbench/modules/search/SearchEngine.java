@@ -1,35 +1,55 @@
 package com.burpworkbench.modules.search;
 
 import com.burpworkbench.core.filter.MimeCategory;
-import com.burpworkbench.core.http.HttpExchange;
 
 import burp.api.montoya.core.ByteArray;
 import burp.api.montoya.http.message.HttpMessage;
 import burp.api.montoya.http.message.HttpRequestResponse;
 import burp.api.montoya.proxy.ProxyHttpRequestResponse;
 
-import java.io.ByteArrayOutputStream;
 import java.net.URI;
 import java.nio.ByteBuffer;
-import java.nio.charset.CharacterCodingException;
+import java.nio.CharBuffer;
 import java.nio.charset.Charset;
+import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CharsetDecoder;
-import java.nio.charset.CharsetEncoder;
 import java.nio.charset.CodingErrorAction;
+import java.nio.charset.CoderResult;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CancellationException;
+import java.util.function.LongSupplier;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
 
-public final class SearchEngine {
+final class SearchEngine {
+    private static final Duration DEFAULT_REGEX_ITEM_TIMEOUT = Duration.ofSeconds(2);
+    private static final int STREAM_DECODE_BUFFER_SIZE = 8 * 1024;
+
+    private final long regexItemTimeoutNanos;
+    private final long regexItemTimeoutMillis;
+    private final LongSupplier nanoTime;
+
+    public SearchEngine() {
+        this(DEFAULT_REGEX_ITEM_TIMEOUT, System::nanoTime);
+    }
+
+    SearchEngine(Duration regexItemTimeout, LongSupplier nanoTime) {
+        Objects.requireNonNull(regexItemTimeout, "regexItemTimeout");
+        if (regexItemTimeout.isZero() || regexItemTimeout.isNegative()) {
+            throw new IllegalArgumentException("regex item timeout must be positive");
+        }
+        this.regexItemTimeoutNanos = regexItemTimeout.toNanos();
+        this.regexItemTimeoutMillis = regexItemTimeout.toMillis();
+        this.nanoTime = Objects.requireNonNull(nanoTime, "nanoTime");
+    }
+
     public List<SearchResult> search(List<HttpExchange> exchanges, SearchOptions options) {
         if (exchanges == null || exchanges.isEmpty()) {
             return List.of();
@@ -115,27 +135,33 @@ public final class SearchEngine {
         return false;
     }
 
-    private boolean matchesSelectedParts(HttpExchange exchange, PreparedSearch preparedSearch) {
+    private boolean matchesSelectedParts(
+            HttpExchange exchange,
+            PreparedSearch preparedSearch,
+            RegexOperationGuard regexGuard
+    ) {
         SearchOptions options = preparedSearch.options;
         HttpRequestResponse requestResponse = exchange.requestResponse();
 
         try {
             HttpMessage request = requestResponse.request();
-            if (options.requestHeaders() && preparedSearch.matches(partForHeaders(request))) {
+            if (options.requestHeaders() && preparedSearch.matches(partForHeaders(request), regexGuard)) {
                 return true;
             }
-            if (options.requestBody() && preparedSearch.matches(partForBody(request))) {
+            if (options.requestBody() && preparedSearch.matches(partForBody(request), regexGuard)) {
                 return true;
             }
             if (requestResponse.hasResponse() && requestResponse.response() != null) {
                 HttpMessage response = requestResponse.response();
-                if (options.responseHeaders() && preparedSearch.matches(partForHeaders(response))) {
+                if (options.responseHeaders() && preparedSearch.matches(partForHeaders(response), regexGuard)) {
                     return true;
                 }
-                if (options.responseBody() && preparedSearch.matches(partForBody(response))) {
+                if (options.responseBody() && preparedSearch.matches(partForBody(response), regexGuard)) {
                     return true;
                 }
             }
+        } catch (SearchItemTimeoutException exception) {
+            throw exception;
         } catch (CancellationException exception) {
             throw exception;
         } catch (RuntimeException ignored) {
@@ -156,7 +182,7 @@ public final class SearchEngine {
         return new MessagePart(message, bytes, 0, bytes.length());
     }
 
-    private boolean containsBytes(MessagePart part, byte[] needle, byte[] asciiFoldMask) {
+    private boolean containsBytes(MessagePart part, byte[] needle) {
         if (needle.length == 0 || part.length() < needle.length) {
             return false;
         }
@@ -169,9 +195,7 @@ public final class SearchEngine {
             for (int needleIndex = 0; needleIndex < needle.length; needleIndex++) {
                 byte actual = part.bytes().getByte(index + needleIndex);
                 byte expected = needle[needleIndex];
-                if (asciiFoldMask != null && asciiFoldMask[needleIndex] != 0
-                        ? asciiLower(actual) != asciiLower(expected)
-                        : actual != expected) {
+                if (actual != expected) {
                     matched = false;
                     break;
                 }
@@ -181,10 +205,6 @@ public final class SearchEngine {
             }
         }
         return false;
-    }
-
-    private byte asciiLower(byte value) {
-        return value >= 'A' && value <= 'Z' ? (byte) (value + ('a' - 'A')) : value;
     }
 
     private boolean containsAsciiText(MessagePart part, String query, boolean caseSensitive) {
@@ -197,12 +217,18 @@ public final class SearchEngine {
         ) >= 0;
     }
 
-    private byte[] copyBytes(MessagePart part) {
+    private byte[] copyBytes(MessagePart part, RegexOperationGuard regexGuard) {
         ensureSearchNotCancelled();
+        if (regexGuard != null) {
+            regexGuard.check();
+        }
         byte[] copy = new byte[part.length()];
         for (int index = 0; index < copy.length; index++) {
             if ((index & 0x3fff) == 0) {
                 ensureSearchNotCancelled();
+                if (regexGuard != null) {
+                    regexGuard.check();
+                }
             }
             copy[index] = part.bytes().getByte(part.startInclusive() + index);
         }
@@ -241,34 +267,43 @@ public final class SearchEngine {
     }
 
     private List<Charset> charsets(HttpMessage message) {
-        List<Charset> charsets = new ArrayList<>();
-        Charset declared = declaredCharset(message);
-        if (declared != null) {
-            charsets.add(declared);
+        return charsetCandidates(message).values();
+    }
+
+    private CharsetCandidates charsetCandidates(HttpMessage message) {
+        try {
+            String contentType = message.headerValue("Content-Type");
+            if (contentType != null) {
+                for (String part : contentType.split(";")) {
+                    String trimmed = part.trim();
+                    if (trimmed.toLowerCase(Locale.ROOT)
+                            .startsWith("charset=")) {
+                        String declaredName = trimmed.substring(
+                                "charset=".length()
+                        ).replace("\"", "").trim();
+                        try {
+                            return new CharsetCandidates(
+                                    true,
+                                    List.of(Charset.forName(declaredName))
+                            );
+                        } catch (RuntimeException invalidDeclaration) {
+                            // A declaration is authoritative even when invalid:
+                            // do not reinterpret the bytes using fallback sets.
+                            return new CharsetCandidates(true, List.of());
+                        }
+                    }
+                }
+            }
+        } catch (RuntimeException ignored) {
+            return new CharsetCandidates(true, List.of());
         }
+
+        List<Charset> charsets = new ArrayList<>();
         addIfMissing(charsets, StandardCharsets.UTF_8);
         addIfMissing(charsets, Charset.forName("MS949"));
         addIfMissing(charsets, Charset.forName("EUC-KR"));
         addIfMissing(charsets, StandardCharsets.ISO_8859_1);
-        return charsets;
-    }
-
-    private Charset declaredCharset(HttpMessage message) {
-        try {
-            String contentType = message.headerValue("Content-Type");
-            if (contentType == null) {
-                return null;
-            }
-            for (String part : contentType.split(";")) {
-                String trimmed = part.trim();
-                if (trimmed.toLowerCase(Locale.ROOT).startsWith("charset=")) {
-                    return Charset.forName(trimmed.substring("charset=".length()).replace("\"", "").trim());
-                }
-            }
-        } catch (RuntimeException ignored) {
-            return null;
-        }
-        return null;
+        return new CharsetCandidates(false, List.copyOf(charsets));
     }
 
     private void addIfMissing(List<Charset> values, Charset value) {
@@ -345,9 +380,6 @@ public final class SearchEngine {
         private final SearchOptions options;
         private final Pattern textPattern;
         private final byte[] hexNeedle;
-        private final boolean literalByteSearch;
-        private final boolean asciiFoldByteSearch;
-        private final Map<Charset, EncodedNeedle> encodedNeedles = new HashMap<>();
 
         private PreparedSearch(SearchOptions options) {
             this.options = options;
@@ -367,8 +399,6 @@ public final class SearchEngine {
             }
             this.textPattern = compiledPattern;
             this.hexNeedle = options.mode() == SearchMode.HEX ? parseHex(options.query()) : new byte[0];
-            this.literalByteSearch = options.caseSensitive() || hasNoCaseVariants(options.query());
-            this.asciiFoldByteSearch = !options.caseSensitive() && hasOnlyAsciiCaseVariants(options.query());
         }
 
         public boolean matches(HttpExchange exchange) {
@@ -379,9 +409,11 @@ public final class SearchEngine {
                 return !options.negativeMatch();
             }
 
+            RegexOperationGuard regexGuard =
+                    textPattern == null ? null : new RegexOperationGuard();
             boolean matched = switch (options.mode()) {
-                case HEX -> hexNeedle.length > 0 && matchesSelectedParts(exchange, this);
-                case TEXT -> matchesSelectedParts(exchange, this);
+                case HEX -> hexNeedle.length > 0 && matchesSelectedParts(exchange, this, null);
+                case TEXT -> matchesSelectedParts(exchange, this, regexGuard);
             };
             return options.negativeMatch() ? !matched : matched;
         }
@@ -401,6 +433,7 @@ public final class SearchEngine {
         public boolean supportsNativeWholeMessageSearch() {
             return options.mode() == SearchMode.TEXT
                     && !options.query().isBlank()
+                    && !options.regex()
                     && isAscii(options.query())
                     && options.requestHeaders()
                     && options.requestBody()
@@ -412,9 +445,7 @@ public final class SearchEngine {
             if (!supportsNativeWholeMessageSearch() || requestResponse == null) {
                 return false;
             }
-            boolean matched = options.regex()
-                    ? requestResponse.contains(textPattern)
-                    : requestResponse.contains(options.query(), options.caseSensitive());
+            boolean matched = requestResponse.contains(options.query(), options.caseSensitive());
             return options.negativeMatch() ? !matched : matched;
         }
 
@@ -422,180 +453,258 @@ public final class SearchEngine {
             if (!supportsNativeWholeMessageSearch() || requestResponse == null) {
                 return false;
             }
-            boolean matched = options.regex()
-                    ? requestResponse.contains(textPattern)
-                    : requestResponse.contains(options.query(), options.caseSensitive());
+            boolean matched = requestResponse.contains(options.query(), options.caseSensitive());
             return options.negativeMatch() ? !matched : matched;
         }
 
-        private boolean matches(MessagePart part) {
+        private boolean matches(MessagePart part, RegexOperationGuard regexGuard) {
             if (options.mode() == SearchMode.HEX) {
-                return containsBytes(part, hexNeedle, null);
+                return containsBytes(part, hexNeedle);
             }
             if (options.regex()) {
-                return matchesDecoded(part, true);
+                return matchesDecoded(part, true, regexGuard);
             }
             if (isAscii(options.query())) {
                 return containsAsciiText(part, options.query(), options.caseSensitive());
             }
-            if (literalByteSearch || asciiFoldByteSearch) {
-                boolean foldAsciiQueryCharacters = !literalByteSearch && asciiFoldByteSearch;
-                Charset declared = declaredCharset(part.message());
-                if (foldAsciiQueryCharacters && declared == null) {
-                    return matchesDecoded(part, false);
-                }
+            return matchesDecoded(part, false, null);
+        }
 
-                List<Charset> candidateCharsets =
-                        declared == null ? charsets(part.message()) : List.of(declared);
-                for (Charset charset : candidateCharsets) {
-                    EncodedNeedle needle = encodedNeedle(charset);
-                    if (needle.bytes().length == 0) {
-                        continue;
-                    }
-                    if (foldAsciiQueryCharacters && !needle.supportsAsciiFold()) {
-                        return matchesDecoded(part, false);
-                    }
-                    byte[] foldMask = foldAsciiQueryCharacters ? needle.asciiFoldMask() : null;
-                    if (containsBytes(part, needle.bytes(), foldMask)) {
+        private String decodeStrict(byte[] bytes, Charset charset) {
+            try {
+                return charset.newDecoder()
+                        .onMalformedInput(CodingErrorAction.REPORT)
+                        .onUnmappableCharacter(CodingErrorAction.REPORT)
+                        .decode(ByteBuffer.wrap(bytes))
+                        .toString();
+            } catch (CharacterCodingException exception) {
+                return null;
+            }
+        }
+
+        private boolean matchesDecoded(
+                MessagePart part,
+                boolean regex,
+                RegexOperationGuard regexGuard
+        ) {
+            if (!regex) {
+                for (Charset charset : charsets(part.message())) {
+                    if (matchesDecodedLiteralStreaming(part, charset)) {
                         return true;
                     }
                 }
                 return false;
             }
-            return matchesDecoded(part, false);
-        }
 
-        private boolean matchesDecoded(MessagePart part, boolean regex) {
-            byte[] bytes = copyBytes(part);
-            Charset declared = declaredCharset(part.message());
-            List<Charset> candidateCharsets =
-                    declared == null ? charsets(part.message()) : List.of(declared);
-            for (Charset charset : candidateCharsets) {
+            byte[] bytes = copyBytes(part, regexGuard);
+            for (Charset charset : charsets(part.message())) {
                 ensureSearchNotCancelled();
-                if (matchesDecoded(bytes, charset, regex)) {
+                if (regexGuard != null) {
+                    regexGuard.check();
+                }
+                if (matchesDecoded(bytes, charset, regex, regexGuard)) {
                     return true;
                 }
             }
             return false;
         }
 
-        private boolean matchesDecoded(byte[] bytes, Charset charset, boolean regex) {
+        private boolean matchesDecodedLiteralStreaming(
+                MessagePart part,
+                Charset charset
+        ) {
             CharsetDecoder decoder = charset.newDecoder()
                     .onMalformedInput(CodingErrorAction.REPORT)
                     .onUnmappableCharacter(CodingErrorAction.REPORT);
-            String text;
-            try {
-                text = decoder.decode(ByteBuffer.wrap(bytes)).toString();
-            } catch (CharacterCodingException exception) {
+            ByteBuffer input = ByteBuffer.allocate(STREAM_DECODE_BUFFER_SIZE);
+            CharBuffer output = CharBuffer.allocate(STREAM_DECODE_BUFFER_SIZE);
+            StreamingSubstringMatcher matcher =
+                    new StreamingSubstringMatcher(
+                            options.query(),
+                            options.caseSensitive()
+                    );
+            int sourceOffset = part.startInclusive();
+            boolean endOfInput = sourceOffset >= part.endExclusive();
+
+            while (true) {
+                ensureSearchNotCancelled();
+                while (!endOfInput && input.hasRemaining()) {
+                    input.put(part.bytes().getByte(sourceOffset++));
+                    endOfInput = sourceOffset >= part.endExclusive();
+                }
+                input.flip();
+
+                CoderResult decodeResult;
+                do {
+                    decodeResult = decoder.decode(input, output, endOfInput);
+                    consumeDecodedCharacters(output, matcher);
+                    if (decodeResult.isError()) {
+                        return false;
+                    }
+                } while (decodeResult.isOverflow());
+
+                input.compact();
+                if (!endOfInput) {
+                    continue;
+                }
+                if (input.position() != 0) {
+                    // A strict decoder leaves an incomplete terminal sequence
+                    // unconsumed when end-of-input is reached.
+                    return false;
+                }
+
+                CoderResult flushResult;
+                do {
+                    flushResult = decoder.flush(output);
+                    consumeDecodedCharacters(output, matcher);
+                    if (flushResult.isError()) {
+                        return false;
+                    }
+                } while (flushResult.isOverflow());
+                return matcher.matched();
+            }
+        }
+
+        private void consumeDecodedCharacters(
+                CharBuffer output,
+                StreamingSubstringMatcher matcher
+        ) {
+            output.flip();
+            while (output.hasRemaining()) {
+                matcher.accept(output.get());
+            }
+            output.clear();
+            ensureSearchNotCancelled();
+        }
+
+        private boolean matchesDecoded(
+                byte[] bytes,
+                Charset charset,
+                boolean regex,
+                RegexOperationGuard regexGuard
+        ) {
+            String text = decodeStrict(bytes, charset);
+            if (text == null) {
                 return false;
             }
-            return regex
-                    ? textPattern.matcher(new InterruptibleCharSequence(text)).find()
+            if (regexGuard != null) {
+                regexGuard.check();
+            }
+            if (regex) {
+                return textPattern.matcher(
+                        new InterruptibleCharSequence(text, regexGuard)
+                ).find();
+            }
+            return options.caseSensitive()
+                    ? text.contains(options.query())
                     : containsTextIgnoringCase(text, options.query());
-        }
-
-        private EncodedNeedle encodedNeedle(Charset charset) {
-            return encodedNeedles.computeIfAbsent(charset, value -> {
-                CharsetEncoder encoder = value.newEncoder();
-                if (!encoder.canEncode(options.query())) {
-                    return EncodedNeedle.notEncodable();
-                }
-
-                byte[] encoded = options.query().getBytes(value);
-                if (!asciiFoldByteSearch || literalByteSearch) {
-                    return new EncodedNeedle(encoded, null, true);
-                }
-
-                ByteArrayOutputStream segmented = new ByteArrayOutputStream(encoded.length);
-                ByteArrayOutputStream foldMask = new ByteArrayOutputStream(encoded.length);
-                boolean foldSupported = true;
-                int offset = 0;
-                while (offset < options.query().length()) {
-                    int character = options.query().codePointAt(offset);
-                    String segment = new String(Character.toChars(character));
-                    byte[] segmentBytes = segment.getBytes(value);
-                    segmented.writeBytes(segmentBytes);
-
-                    boolean asciiLetter = (character >= 'A' && character <= 'Z')
-                            || (character >= 'a' && character <= 'z');
-                    if (asciiLetter
-                            && (segmentBytes.length != 1 || segmentBytes[0] != (byte) character)) {
-                        foldSupported = false;
-                    }
-                    for (int index = 0; index < segmentBytes.length; index++) {
-                        foldMask.write(asciiLetter ? 1 : 0);
-                    }
-                    offset += Character.charCount(character);
-                }
-
-                byte[] segmentedBytes = segmented.toByteArray();
-                if (!Arrays.equals(encoded, segmentedBytes)) {
-                    foldSupported = false;
-                }
-                foldSupported = foldSupported && hasSafeAsciiByteBoundaries(value);
-                return new EncodedNeedle(
-                        encoded,
-                        foldMask.toByteArray(),
-                        foldSupported
-                );
-            });
-        }
-
-        private boolean hasSafeAsciiByteBoundaries(Charset charset) {
-            return charset.equals(StandardCharsets.UTF_8)
-                    || charset.equals(StandardCharsets.ISO_8859_1)
-                    || charset.equals(Charset.forName("EUC-KR"));
         }
 
         private boolean isAscii(String value) {
             return value.chars().allMatch(character -> character <= 0x7f);
         }
 
-        private boolean hasNoCaseVariants(String value) {
-            return value.equals(value.toLowerCase(Locale.ROOT)) && value.equals(value.toUpperCase(Locale.ROOT));
-        }
+    }
 
-        private boolean hasOnlyAsciiCaseVariants(String value) {
-            return value.codePoints().allMatch(character ->
-                    character <= 0x7f
-                            || (Character.toLowerCase(character) == character
-                            && Character.toUpperCase(character) == character)
-            );
+    private final class RegexOperationGuard {
+        private final long startedAt = nanoTime.getAsLong();
+
+        private void check() {
+            ensureSearchNotCancelled();
+            if (nanoTime.getAsLong() - startedAt >= regexItemTimeoutNanos) {
+                throw new SearchItemTimeoutException(regexItemTimeoutMillis);
+            }
         }
     }
 
-    private record InterruptibleCharSequence(CharSequence delegate) implements CharSequence {
+    private record InterruptibleCharSequence(
+            CharSequence delegate,
+            RegexOperationGuard regexGuard
+    ) implements CharSequence {
         @Override
         public int length() {
+            regexGuard.check();
             return delegate.length();
         }
 
         @Override
         public char charAt(int index) {
-            if (Thread.currentThread().isInterrupted()) {
-                throw new CancellationException();
-            }
+            regexGuard.check();
             return delegate.charAt(index);
         }
 
         @Override
         public CharSequence subSequence(int start, int end) {
-            return new InterruptibleCharSequence(delegate.subSequence(start, end));
+            regexGuard.check();
+            return new InterruptibleCharSequence(delegate.subSequence(start, end), regexGuard);
         }
 
         @Override
         public String toString() {
+            regexGuard.check();
             return delegate.toString();
         }
     }
 
-    private record EncodedNeedle(
-            byte[] bytes,
-            byte[] asciiFoldMask,
-            boolean supportsAsciiFold
-    ) {
-        private static EncodedNeedle notEncodable() {
-            return new EncodedNeedle(new byte[0], null, false);
+    private static final class StreamingSubstringMatcher {
+        private final char[] query;
+        private final int[] prefixLengths;
+        private final boolean caseSensitive;
+        private int matchedLength;
+        private boolean matched;
+
+        private StreamingSubstringMatcher(
+                String query,
+                boolean caseSensitive
+        ) {
+            this.query = query.toCharArray();
+            this.caseSensitive = caseSensitive;
+            if (!caseSensitive) {
+                for (int index = 0; index < this.query.length; index++) {
+                    this.query[index] = foldCase(this.query[index]);
+                }
+            }
+            this.prefixLengths = prefixLengths(this.query);
+        }
+
+        private void accept(char value) {
+            if (matched || query.length == 0) {
+                matched = true;
+                return;
+            }
+            char comparable = caseSensitive ? value : foldCase(value);
+            while (matchedLength > 0 && query[matchedLength] != comparable) {
+                matchedLength = prefixLengths[matchedLength - 1];
+            }
+            if (query[matchedLength] == comparable) {
+                matchedLength++;
+            }
+            if (matchedLength == query.length) {
+                matched = true;
+            }
+        }
+
+        private boolean matched() {
+            return matched;
+        }
+
+        private static int[] prefixLengths(char[] query) {
+            int[] prefixes = new int[query.length];
+            int matched = 0;
+            for (int index = 1; index < query.length; index++) {
+                while (matched > 0 && query[index] != query[matched]) {
+                    matched = prefixes[matched - 1];
+                }
+                if (query[index] == query[matched]) {
+                    matched++;
+                }
+                prefixes[index] = matched;
+            }
+            return prefixes;
+        }
+
+        private static char foldCase(char value) {
+            return Character.toLowerCase(Character.toUpperCase(value));
         }
     }
 
@@ -608,5 +717,11 @@ public final class SearchEngine {
         private int length() {
             return endExclusive - startInclusive;
         }
+    }
+
+    private record CharsetCandidates(
+            boolean declared,
+            List<Charset> values
+    ) {
     }
 }

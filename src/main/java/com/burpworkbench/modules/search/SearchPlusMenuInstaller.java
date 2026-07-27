@@ -13,7 +13,7 @@ import java.awt.Component;
 import java.awt.Container;
 import java.awt.Frame;
 
-public final class SearchPlusMenuInstaller {
+final class SearchPlusMenuInstaller {
     private static final String BURP_MENU = "Burp";
     private static final String SEARCH_MENU = "Search";
     private static final String SEARCH_PLUS_MENU = "Search++";

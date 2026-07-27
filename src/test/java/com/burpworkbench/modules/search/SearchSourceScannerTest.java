@@ -1,8 +1,7 @@
 package com.burpworkbench.modules.search;
 
-import com.burpworkbench.core.http.HttpExchange;
-
 import burp.api.montoya.MontoyaApi;
+import burp.api.montoya.core.ByteArray;
 import burp.api.montoya.http.message.HttpRequestResponse;
 import burp.api.montoya.http.message.requests.HttpRequest;
 import burp.api.montoya.http.message.responses.HttpResponse;
@@ -14,12 +13,15 @@ import burp.api.montoya.sitemap.SiteMapNode;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Proxy;
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -136,7 +138,7 @@ class SearchSourceScannerTest {
     }
 
     @Test
-    void rawSourceDeduplicatesOnlyAfterQueryAndFiltersMatch() {
+    void rawSourcePreservesFirstOccurrenceDeduplicationBeforeMatching() {
         String url = "https://example.com/same";
         List<HttpExchange> context = List.of(
                 new HttpExchange("Context", requestResponse(url, 404), null),
@@ -162,7 +164,7 @@ class SearchSourceScannerTest {
                 }
         );
 
-        assertEquals(List.of(200), statuses);
+        assertTrue(statuses.isEmpty());
     }
 
     @Test
@@ -202,14 +204,58 @@ class SearchSourceScannerTest {
         SearchOptions options = targetOptions("needle");
         SearchEngine.PreparedSearch preparedSearch = new SearchEngine().prepare(options);
 
-        int malformedChecks = scanner.scan(
+        SearchSourceScanner.ScanStatistics scanStatistics = scanner.scan(
                 options,
                 preparedSearch,
                 () -> false,
                 exchange -> true
         );
 
-        assertEquals(SearchSourceScanner.PARTITION_COUNT, malformedChecks);
+        assertEquals(
+                SearchSourceScanner.PARTITION_COUNT,
+                scanStatistics.malformedItems()
+        );
+    }
+
+    @Test
+    void regexTimeoutIsIncompleteButTheNextItemStillMatches() {
+        String slowBody = "a".repeat(16_384) + "!";
+        List<HttpExchange> context = List.of(
+                new HttpExchange(
+                        "Context",
+                        regexRequestResponse("https://example.com/slow", slowBody),
+                        null
+                ),
+                new HttpExchange(
+                        "Context",
+                        regexRequestResponse("https://example.com/next", "needle"),
+                        null
+                )
+        );
+        SearchSourceScanner scanner = scanner(null, null, context, item -> null);
+        SearchOptions options = contextRegexOptions("(a+)+$|needle");
+        AtomicLong clock = new AtomicLong();
+        SearchEngine.PreparedSearch preparedSearch = new SearchEngine(
+                Duration.ofNanos(100),
+                clock::getAndIncrement
+        ).prepare(options);
+        List<String> matches = new ArrayList<>();
+
+        SearchSourceScanner.ScanStatistics statistics = scanner.scan(
+                options,
+                preparedSearch,
+                () -> false,
+                exchange -> {
+                    matches.add(exchange.url());
+                    return true;
+                }
+        );
+
+        assertEquals(1, statistics.regexTimeoutItems());
+        assertEquals(2, statistics.scannedItems());
+        assertEquals(1, statistics.matchedItems());
+        assertTrue(statistics.incomplete());
+        assertEquals(List.of("https://example.com/next"), matches);
     }
 
     private SearchSourceScanner scanner(SiteMap siteMap) {
@@ -331,6 +377,29 @@ class SearchSourceScannerTest {
         });
     }
 
+    private HttpRequestResponse regexRequestResponse(String url, String text) {
+        HttpRequest request = request(url);
+        byte[] bodyBytes = text.getBytes(StandardCharsets.UTF_8);
+        ByteArray body = proxy(ByteArray.class, (method, args) -> switch (method.getName()) {
+            case "length" -> bodyBytes.length;
+            case "getByte" -> bodyBytes[(int) args[0]];
+            default -> defaultValue(method.getReturnType());
+        });
+        HttpResponse response = proxy(HttpResponse.class, (method, args) -> switch (method.getName()) {
+            case "body" -> body;
+            case "headerValue" -> "Content-Type".equals(args[0])
+                    ? "text/plain; charset=utf-8"
+                    : null;
+            default -> defaultValue(method.getReturnType());
+        });
+        return proxy(HttpRequestResponse.class, (method, args) -> switch (method.getName()) {
+            case "request" -> request;
+            case "response" -> response;
+            case "hasResponse" -> true;
+            default -> defaultValue(method.getReturnType());
+        });
+    }
+
     private HttpRequest request(String url) {
         return proxy(HttpRequest.class, (method, args) -> switch (method.getName()) {
             case "url" -> url;
@@ -400,6 +469,28 @@ class SearchSourceScannerTest {
                 false,
                 false,
                 Set.of("2xx"),
+                Set.of(),
+                Set.of()
+        );
+    }
+
+    private SearchOptions contextRegexOptions(String query) {
+        return new SearchOptions(
+                query,
+                SearchMode.TEXT,
+                true,
+                true,
+                false,
+                false,
+                false,
+                false,
+                true,
+                false,
+                false,
+                false,
+                false,
+                true,
+                Set.of(),
                 Set.of(),
                 Set.of()
         );

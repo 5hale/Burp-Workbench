@@ -4,14 +4,13 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 
-public final class ExportSummary {
+final class ExportSummary {
     private final Path outputDirectory;
     private final int selectedCount;
     private final List<String> errors = new ArrayList<>();
     private int candidateCount;
     private int savedCount;
     private int skippedNoResponseCount;
-    private int filteredCount;
     private int duplicateCount;
     private int failedCount;
     private int beautifiedCount;
@@ -21,6 +20,7 @@ public final class ExportSummary {
     private long rawBytes;
     private long savedBytes;
     private long beautifiedBytes;
+    private String terminalDiagnostic = "";
 
     public ExportSummary(Path outputDirectory, int selectedCount) {
         this.outputDirectory = outputDirectory;
@@ -41,19 +41,38 @@ public final class ExportSummary {
         skippedNoResponseCount++;
     }
 
-    public void incrementFiltered() {
-        filteredCount++;
-    }
-
     public void incrementDuplicate() {
         duplicateCount++;
     }
 
     public void incrementFailed(String error) {
         failedCount++;
+        addDiagnostic(error);
+    }
+
+    void addDiagnostic(String error) {
         if (error != null && !error.isBlank() && errors.size() < 10) {
             errors.add(error);
         }
+    }
+
+    void addTerminalDiagnostic(String diagnostic) {
+        if (diagnostic == null || diagnostic.isBlank()) {
+            return;
+        }
+        terminalDiagnostic = diagnostic;
+        if (errors.size() >= 10) {
+            errors.remove(errors.size() - 1);
+        }
+        errors.add(diagnostic);
+    }
+
+    void setTerminalDiagnostic(String diagnostic) {
+        terminalDiagnostic = diagnostic == null ? "" : diagnostic;
+    }
+
+    String terminalDiagnostic() {
+        return terminalDiagnostic;
     }
 
     public void incrementBeautified(long byteCount) {
@@ -61,15 +80,9 @@ public final class ExportSummary {
         beautifiedBytes += Math.max(byteCount, 0);
     }
 
-    public void incrementBeautifiedJavascript(long byteCount) {
-        incrementBeautified(byteCount);
-    }
-
     public void incrementBeautifyFailed(String error) {
         beautifyFailedCount++;
-        if (error != null && !error.isBlank() && errors.size() < 10) {
-            errors.add(error);
-        }
+        addDiagnostic(error);
     }
 
     public void markCancelled(int remainingCount) {
@@ -86,7 +99,7 @@ public final class ExportSummary {
     }
 
     public int skippedCount() {
-        return skippedNoResponseCount + filteredCount;
+        return skippedNoResponseCount;
     }
 
     public int duplicateCount() {
@@ -122,6 +135,7 @@ public final class ExportSummary {
                 + ", beautified=" + beautifiedCount
                 + ", beautifyFailed=" + beautifyFailedCount
                 + ", cancelled=" + cancelled
+                + (terminalDiagnostic.isBlank() ? "" : ", terminal={" + terminalDiagnostic + "}")
                 + ", output=" + outputDirectory;
     }
 

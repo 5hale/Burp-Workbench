@@ -33,8 +33,8 @@ final class SearchPlusTabState {
     boolean hideExtension;
     String hideExtensionText = "";
     final Map<MimeCategory, Boolean> mimeSelections = defaultMimeSelections();
-    List<SearchResult> allResults = List.of();
-    List<SearchResult> currentResults = List.of();
+    List<SearchResult> allResults = new ArrayList<>();
+    SearchResultView visibleResults = new SearchResultView(allResults);
     int[] selectedModelRows = new int[0];
     String countText = "0 results";
     long searchRunId;
@@ -42,6 +42,9 @@ final class SearchPlusTabState {
     boolean searchFailed;
     int skippedResults;
     int malformedItems;
+    int scanRegexTimeoutItems;
+    int regexTimeoutItems;
+    boolean filtersDirty;
 
     private SearchPlusTabState(String title) {
         rename(title);
@@ -69,15 +72,6 @@ final class SearchPlusTabState {
     static String previewSearchExpression(SearchMode mode, String query) {
         String safeQuery = query == null ? "" : query;
         return mode == SearchMode.TEXT && !safeQuery.isBlank() ? safeQuery : "";
-    }
-
-    void setResults(List<SearchResult> allResults, List<SearchResult> currentResults) {
-        this.allResults = copyResults(allResults);
-        this.currentResults = copyResults(currentResults);
-    }
-
-    private static List<SearchResult> copyResults(List<SearchResult> results) {
-        return results == null || results.isEmpty() ? List.of() : new ArrayList<>(results);
     }
 
     private static Map<MimeCategory, Boolean> defaultMimeSelections() {

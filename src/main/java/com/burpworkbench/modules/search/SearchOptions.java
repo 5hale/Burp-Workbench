@@ -2,12 +2,13 @@ package com.burpworkbench.modules.search;
 
 import com.burpworkbench.core.filter.MimeCategory;
 
+import java.util.Collections;
 import java.util.EnumSet;
 import java.util.Locale;
 import java.util.Set;
 import java.util.TreeSet;
 
-public record SearchOptions(
+record SearchOptions(
         String query,
         SearchMode mode,
         boolean regex,
@@ -83,7 +84,7 @@ public record SearchOptions(
         statusPatterns = normalizeStatusPatterns(statusPatterns == null ? Set.of() : statusPatterns);
         mimeCategories = mimeCategories == null || mimeCategories.isEmpty()
                 ? Set.of()
-                : EnumSet.copyOf(mimeCategories);
+                : Collections.unmodifiableSet(EnumSet.copyOf(mimeCategories));
         extensions = Set.copyOf(extensions == null ? Set.of() : extensions);
         excludedExtensions = Set.copyOf(excludedExtensions == null ? Set.of() : excludedExtensions);
     }

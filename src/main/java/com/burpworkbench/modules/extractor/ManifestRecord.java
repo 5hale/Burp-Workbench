@@ -1,12 +1,10 @@
 package com.burpworkbench.modules.extractor;
 
-import com.burpworkbench.core.util.JsonLines;
-
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
-public final class ManifestRecord {
+final class ManifestRecord {
     private final Map<String, Object> values;
 
     private ManifestRecord(Map<String, Object> values) {
@@ -40,26 +38,6 @@ public final class ManifestRecord {
         return new ManifestRecord(values);
     }
 
-    public static ManifestRecord saved(
-            String url,
-            String method,
-            int statusCode,
-            String contentEncoding,
-            String outputPath,
-            boolean decoded,
-            long rawBytes,
-            long savedBytes,
-            String note
-    ) {
-        return saved(url, method, statusCode, contentEncoding, "", "", outputPath, decoded, rawBytes, savedBytes, "", note);
-    }
-
-    public static ManifestRecord skipped(String url, String method, int statusCode, String reason) {
-        Map<String, Object> values = base("skipped", url, method, statusCode);
-        values.put("reason", reason);
-        return new ManifestRecord(values);
-    }
-
     public static ManifestRecord skipped(ExportCandidate candidate, String reason) {
         Map<String, Object> values = base("skipped", candidate.url(), candidate.method(), candidate.statusCode());
         values.put("contentType", candidate.contentType());
@@ -83,23 +61,6 @@ public final class ManifestRecord {
         values.put("savedBytes", candidate.savedByteCount());
         values.put("sha256", candidate.bodySha256());
         values.put("reason", "duplicate body sha256");
-        return new ManifestRecord(values);
-    }
-
-    public static ManifestRecord failed(
-            String url,
-            String method,
-            int statusCode,
-            String contentEncoding,
-            String outputPath,
-            long rawBytes,
-            String error
-    ) {
-        Map<String, Object> values = base("failed", url, method, statusCode);
-        values.put("contentEncoding", contentEncoding);
-        values.put("outputPath", outputPath);
-        values.put("rawBytes", rawBytes);
-        values.put("error", error);
         return new ManifestRecord(values);
     }
 

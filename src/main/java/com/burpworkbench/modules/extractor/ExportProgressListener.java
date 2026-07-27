@@ -1,8 +1,7 @@
 package com.burpworkbench.modules.extractor;
 
-public interface ExportProgressListener {
+interface ExportProgressListener {
     boolean isCancelled();
 
     void onProgress(ExportProgress progress);
 }
-

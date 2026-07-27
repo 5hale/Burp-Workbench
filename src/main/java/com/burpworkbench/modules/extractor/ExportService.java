@@ -1,9 +1,6 @@
 package com.burpworkbench.modules.extractor;
 
-import com.burpworkbench.core.codec.DecodeResult;
-import com.burpworkbench.core.util.Hashes;
 import com.burpworkbench.core.filter.MimeCategory;
-import com.burpworkbench.core.codec.ResponseBodyDecoder;
 import com.burpworkbench.core.selection.SelectionResolver;
 
 import burp.api.montoya.MontoyaApi;
@@ -11,43 +8,50 @@ import burp.api.montoya.http.message.HttpRequestResponse;
 import burp.api.montoya.http.message.responses.HttpResponse;
 
 import java.io.IOException;
+import java.nio.channels.ClosedByInterruptException;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Optional;
+import java.util.concurrent.CancellationException;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-public final class ExportService {
+final class ExportService {
     private static final DateTimeFormatter RUN_DIRECTORY_FORMAT = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss");
     private static final Pattern CHARSET_PATTERN = Pattern.compile("(?i)(?:^|;)\\s*charset\\s*=\\s*\"?([^\";\\s]+)\"?");
+    private static final long DEFAULT_BEAUTIFY_MEMORY_BUDGET = 8L * 1024 * 1024;
+    private static final long PROGRESS_INTERVAL_NANOS = 100_000_000L;
 
-    private final MontoyaApi api;
     private final UrlPathMapper pathMapper;
     private final ResponseBodyDecoder bodyDecoder;
-    private final ExportPlanner planner;
     private final ExportIndexWriter indexWriter;
     private final SelectionResolver selectionResolver;
     private final BodyBeautifier bodyBeautifier;
+    private final long beautifyMemoryBudget;
+    private final MontoyaApi api;
 
     public ExportService(MontoyaApi api) {
+        this(api, Long.getLong(
+                "burpworkbench.extractor.beautifyMemoryBudgetBytes",
+                DEFAULT_BEAUTIFY_MEMORY_BUDGET
+        ));
+    }
+
+    ExportService(MontoyaApi api, long beautifyMemoryBudget) {
         this.api = api;
         this.pathMapper = new UrlPathMapper();
         this.bodyDecoder = new ResponseBodyDecoder();
-        this.planner = new ExportPlanner();
         this.indexWriter = new ExportIndexWriter();
         this.selectionResolver = new SelectionResolver(api);
         this.bodyBeautifier = new BodyBeautifier();
-    }
-
-    public ExportSummary export(List<HttpRequestResponse> selectedItems, boolean includeSubtree, Path outputRoot)
-            throws IOException {
-        return export(selectedItems, includeSubtree, outputRoot, ExportOptions.defaults(), new NoOpExportProgressListener());
+        this.beautifyMemoryBudget = Math.max(beautifyMemoryBudget, 1);
     }
 
     public ExportSummary export(
@@ -57,104 +61,182 @@ public final class ExportService {
             ExportOptions options,
             ExportProgressListener progressListener
     ) throws IOException {
-        List<ExportCandidate> candidates = analyzeCandidates(selectedItems, includeSubtree);
-        ExportPlan plan = planner.plan(candidates, options, selectedItems == null ? 0 : selectedItems.size());
-        return executePlan(plan, outputRoot, options, progressListener);
+        int selectedCount = selectedItems == null ? 0 : selectedItems.size();
+        return exportRun(
+                listener -> selectionResolver.resolve(
+                        selectedItems,
+                        includeSubtree,
+                        () -> isCancelled(listener)
+                ),
+                selectedCount,
+                outputRoot,
+                options,
+                progressListener
+        );
     }
 
-    public List<ExportCandidate> analyzeCandidates(List<HttpRequestResponse> selectedItems, boolean includeSubtree) {
-        List<HttpRequestResponse> requestResponses = collectCandidates(selectedItems, includeSubtree);
-        List<ExportCandidate> candidates = new ArrayList<>();
-        for (HttpRequestResponse item : requestResponses) {
-            candidates.add(toCandidate(item));
-        }
-        return candidates;
-    }
-
-    public ExportPlan plan(List<ExportCandidate> candidates, ExportOptions options, int selectedCount) {
-        return planner.plan(candidates, options, selectedCount);
-    }
-
-    public ExportSummary executePlan(ExportPlan plan, Path outputRoot, ExportProgressListener progressListener)
-            throws IOException {
-        return executePlan(plan, outputRoot, ExportOptions.defaults(), progressListener);
-    }
-
-    public ExportSummary executePlan(
-            ExportPlan plan,
+    ExportSummary exportResolved(
+            List<HttpRequestResponse> requestResponses,
+            int selectedCount,
             Path outputRoot,
             ExportOptions options,
             ExportProgressListener progressListener
-    )
-            throws IOException {
-        ExportProgressListener listener = progressListener == null ? new NoOpExportProgressListener() : progressListener;
+    ) throws IOException {
+        List<HttpRequestResponse> resolvedItems = requestResponses == null ? List.of() : requestResponses;
+        return exportRun(
+                listener -> resolvedItems,
+                selectedCount,
+                outputRoot,
+                options,
+                progressListener
+        );
+    }
+
+    private ExportSummary exportRun(
+            ItemSource itemSource,
+            int selectedCount,
+            Path outputRoot,
+            ExportOptions options,
+            ExportProgressListener progressListener
+    ) throws IOException {
         ExportOptions safeOptions = options == null ? ExportOptions.defaults() : options;
+        ExportProgressListener listener = progressListener == null
+                ? new NoOpExportProgressListener()
+                : progressListener;
         Path runDirectory = createRunDirectory(outputRoot);
-        ExportSummary summary = new ExportSummary(runDirectory, plan.selectedCount());
-        summary.setCandidateCount(plan.candidateCount());
-        List<ExportIndexRow> indexRows = new ArrayList<>();
+        ExportSummary summary = new ExportSummary(runDirectory, selectedCount);
+
+        DuplicateIndex duplicateIndex = new DuplicateIndex();
+        OutputPathAllocator pathAllocator = new OutputPathAllocator();
+        ProgressPublisher progress = new ProgressPublisher(listener);
+        int processed = 0;
+        int total = Math.max(selectedCount, 0);
 
         Path manifestPath = runDirectory.resolve("extract_manifest.jsonl");
-        try (ManifestWriter manifestWriter = new ManifestWriter(manifestPath)) {
-            int processed = 0;
-            publishProgress(listener, processed, plan.actions().size(), "", summary);
+        Path indexPath = runDirectory.resolve("extract_index.html");
+        Throwable fatalFailure = null;
+        boolean restoreInterrupt = false;
+        String phase = "terminal-open";
+        try {
+            try (ManifestWriter manifest = new ManifestWriter(manifestPath);
+                 ExportIndexWriter.Sink index = indexWriter.open(indexPath)) {
+                try {
+                    phase = "selection";
+                    List<HttpRequestResponse> loadedItems = itemSource.load(listener);
+                    List<HttpRequestResponse> items = loadedItems == null ? List.of() : loadedItems;
+                    total = items.size();
+                    summary.setCandidateCount(total);
+                    phase = "processing";
+                    progress.publish(processed, items.size(), "", summary, true);
 
-            for (ExportAction action : plan.actions()) {
-                if (listener.isCancelled()) {
-                    int remaining = plan.actions().size() - processed;
-                    summary.markCancelled(remaining);
-                    manifestWriter.write(ManifestRecord.cancelled("cancelled by user", remaining));
-                    indexRows.add(new ExportIndexRow(
-                            "cancelled",
-                            "",
-                            "",
-                            -1,
-                            "",
-                            "",
-                            0,
-                            "",
-                            "",
-                            "",
-                            "cancelled by user; remaining=" + remaining
-                    ));
-                    break;
+                    for (int itemIndex = 0; itemIndex < items.size(); itemIndex++) {
+                        checkCancelled(listener);
+
+                        HttpRequestResponse item = items.get(itemIndex);
+                        String currentUrl = safeUrl(item);
+                        try {
+                            processOne(
+                                    item,
+                                    itemIndex,
+                                    runDirectory,
+                                    safeOptions,
+                                    listener,
+                                    duplicateIndex,
+                                    pathAllocator,
+                                    manifest,
+                                    index,
+                                    summary
+                            );
+                            processed++;
+                        } catch (CancellationException exception) {
+                            throw exception;
+                        } catch (IOException | RuntimeException exception) {
+                            if (isCancellationRequested(listener, exception)) {
+                                throw cancellation(exception);
+                            }
+                            ExportCandidate failed = failureCandidate(item, itemIndex);
+                            recordFailure(failed, message(exception), manifest, index, summary);
+                            processed++;
+                        }
+                        progress.publish(processed, items.size(), currentUrl, summary, false);
+                    }
+
+                    if (processed < items.size()) {
+                        checkCancelled(listener);
+                    }
+                    progress.publish(processed, items.size(), "", summary, true);
+                    phase = "terminal-close";
+                } catch (CancellationException exception) {
+                    restoreInterrupt |= clearCancellationInterrupt(exception);
+                    recordCancellation(Math.max(total - processed, 0), manifest, index, summary);
+                    addTerminalDiagnostic(summary, phase, "cancelled", processed, total, null);
+                    phase = "terminal-close";
+                } catch (IOException | RuntimeException exception) {
+                    if (!isCancellationRequested(listener, exception)) {
+                        throw exception;
+                    }
+                    restoreInterrupt |= clearCancellationInterrupt(exception);
+                    recordCancellation(Math.max(total - processed, 0), manifest, index, summary);
+                    addTerminalDiagnostic(summary, phase, "cancelled", processed, total, null);
+                    phase = "terminal-close";
                 }
+            }
+        } catch (Throwable terminalFailure) {
+            fatalFailure = terminalFailure;
+            if (terminalFailure instanceof OutOfMemoryError) {
+                summary.incrementFailed(null);
+            } else {
+                summary.incrementFailed("run failed: " + messageOf(terminalFailure));
+            }
+            addTerminalDiagnostic(summary, phase, "fatal", processed, total, terminalFailure);
+            logFatalDiagnostic(summary, terminalFailure);
+        }
 
-                executeOne(action, runDirectory, safeOptions, manifestWriter, summary, indexRows);
-                processed++;
-                publishProgress(listener, processed, plan.actions().size(), action.candidate().url(), summary);
+        if (Thread.interrupted()) {
+            restoreInterrupt = true;
+        }
+        if (fatalFailure == null && !summary.cancelled()) {
+            addTerminalDiagnostic(summary, "completed", "success", processed, total, null);
+        }
+        try {
+            if (fatalFailure != null) {
+                try {
+                    writeSummary(runDirectory, summary);
+                } catch (Throwable summaryFailure) {
+                    addSuppressed(fatalFailure, summaryFailure);
+                }
+                throwFailure(fatalFailure);
+            }
+            phase = "summary";
+            writeSummary(runDirectory, summary);
+            return summary;
+        } finally {
+            if (restoreInterrupt) {
+                Thread.currentThread().interrupt();
             }
         }
-
-        indexWriter.write(runDirectory.resolve("extract_index.html"), indexRows);
-        writeSummary(runDirectory, summary);
-        return summary;
     }
 
-    private Path createRunDirectory(Path outputRoot) throws IOException {
-        String baseName = "extract-file-" + LocalDateTime.now().format(RUN_DIRECTORY_FORMAT);
-        Path candidate = outputRoot.resolve(baseName);
-        int suffix = 1;
-        while (Files.exists(candidate)) {
-            candidate = outputRoot.resolve(baseName + "-" + suffix);
-            suffix++;
-        }
-        Files.createDirectories(candidate);
-        return candidate.toAbsolutePath().normalize();
-    }
-
-    private List<HttpRequestResponse> collectCandidates(List<HttpRequestResponse> selectedItems, boolean includeSubtree) {
-        return selectionResolver.resolve(selectedItems, includeSubtree);
-    }
-
-    private ExportCandidate toCandidate(HttpRequestResponse item) {
+    private void processOne(
+            HttpRequestResponse item,
+            int itemIndex,
+            Path runDirectory,
+            ExportOptions options,
+            ExportProgressListener listener,
+            DuplicateIndex duplicateIndex,
+            OutputPathAllocator pathAllocator,
+            ManifestWriter manifest,
+            ExportIndexWriter.Sink index,
+            ExportSummary summary
+    ) throws IOException {
+        checkCancelled(listener);
         String method = safeMethod(item);
         String url = safeUrl(item);
         int statusCode = safeStatusCode(item);
 
-        if (!item.hasResponse() || item.response() == null) {
+        if (!hasUsableResponse(item)) {
             Path relativePath = pathMapper.map(method, url);
-            return new ExportCandidate(
+            ExportCandidate candidate = new ExportCandidate(
                     method,
                     url,
                     false,
@@ -164,112 +246,162 @@ public final class ExportService {
                     "",
                     relativePath,
                     MimeCategory.from("", relativePath),
-                    new byte[0],
-                    new byte[0],
                     false,
                     "no response",
                     Hashes.sha256Hex(new byte[0]),
-                    item
+                    0,
+                    0
             );
+            summary.incrementSkippedNoResponse();
+            manifest.write(ManifestRecord.skipped(candidate, "no response"));
+            index.write(indexRow("skipped", candidate, "", "", "", "no response"));
+            return;
         }
 
+        checkCancelled(listener);
         HttpResponse response = item.response();
-        byte[] rawBody = response.body().getBytes();
-        String contentEncoding = response.headerValue("Content-Encoding");
-        String contentType = response.headerValue("Content-Type");
-        String contentDisposition = response.headerValue("Content-Disposition");
-        DecodeResult decodedBody = bodyDecoder.decode(rawBody, contentEncoding);
-        Path relativePath = pathMapper.map(method, url, contentType, contentDisposition);
-
-        return new ExportCandidate(
+        String contentEncoding = safeHeader(response, "Content-Encoding");
+        String contentType = safeHeader(response, "Content-Type");
+        String contentDisposition = safeHeader(response, "Content-Disposition");
+        Path requestedRelativePath = pathMapper.map(
                 method,
                 url,
-                true,
-                statusCode,
                 contentType,
-                contentEncoding,
-                contentDisposition,
-                relativePath,
-                MimeCategory.from(contentType, relativePath),
-                rawBody,
-                decodedBody.bytes(),
-                decodedBody.decoded(),
-                decodedBody.note(),
-                Hashes.sha256Hex(decodedBody.bytes()),
-                item
+                contentDisposition
         );
-    }
 
-    private void executeOne(
-            ExportAction action,
-            Path runDirectory,
-            ExportOptions options,
-            ManifestWriter manifestWriter,
-            ExportSummary summary,
-            List<ExportIndexRow> indexRows
-    ) throws IOException {
-        ExportCandidate candidate = action.candidate();
+        checkCancelled(listener);
+        byte[] rawBody = response.body().getBytes();
+        FileDecodeResult decodedBody = bodyDecoder.decodeToTempFile(
+                rawBody,
+                contentEncoding,
+                runDirectory,
+                () -> isCancelled(listener)
+        );
+        Throwable bodyFailure = null;
+        try {
+            rawBody = null;
+            checkCancelled(listener);
+            ExportCandidate candidate = new ExportCandidate(
+                    method,
+                    url,
+                    true,
+                    statusCode,
+                    contentType,
+                    contentEncoding,
+                    contentDisposition,
+                    requestedRelativePath,
+                    MimeCategory.from(contentType, requestedRelativePath),
+                    decodedBody.decoded(),
+                    decodedBody.note(),
+                    decodedBody.sha256(),
+                    decodedBody.rawByteCount(),
+                    decodedBody.decodedByteCount()
+            );
 
-        switch (action.type()) {
-            case SAVED -> saveCandidate(candidate, runDirectory, options, manifestWriter, summary, indexRows);
-            case SKIPPED -> {
-                if ("no response".equals(action.reason())) {
-                    summary.incrementSkippedNoResponse();
-                } else {
-                    summary.incrementFiltered();
-                }
-                manifestWriter.write(ManifestRecord.skipped(candidate, action.reason()));
-                indexRows.add(indexRow("skipped", candidate, "", "", "", action.reason()));
-            }
-            case DUPLICATE -> {
+            Optional<DuplicateIndex.DuplicateReference> duplicate = duplicateIndex.find(candidate.bodySha256());
+            if (duplicate.isPresent()) {
+                DuplicateIndex.DuplicateReference original = duplicate.get();
                 summary.incrementDuplicate();
-                manifestWriter.write(ManifestRecord.duplicate(candidate, action.duplicateOfPath(), action.duplicateOfUrl()));
-                indexRows.add(indexRow(
+                manifest.write(ManifestRecord.duplicate(candidate, original.relativePath(), original.url()));
+                index.write(indexRow(
                         "duplicate",
                         candidate,
                         "",
-                        action.duplicateOfPath(),
-                        action.duplicateOfUrl(),
-                        action.reason()
+                        original.relativePath(),
+                        original.url(),
+                        "duplicate body sha256"
                 ));
+                return;
             }
-            case FAILED -> {
-                summary.incrementFailed(action.reason());
-                manifestWriter.write(ManifestRecord.failed(candidate, action.reason()));
-                indexRows.add(indexRow("failed", candidate, candidate.relativePath().toString(), "", "", action.reason()));
+
+            checkCancelled(listener);
+            Path allocatedRelativePath = pathAllocator.allocate(candidate.relativePath());
+            ExportCandidate allocatedCandidate = withRelativePath(candidate, allocatedRelativePath);
+            duplicateIndex.rememberFirst(
+                    allocatedCandidate.bodySha256(),
+                    allocatedCandidate.relativePath(),
+                    allocatedCandidate.url()
+            );
+            saveCandidate(
+                    allocatedCandidate,
+                    decodedBody.path(),
+                    runDirectory,
+                    options,
+                    listener,
+                    manifest,
+                    index,
+                    summary
+            );
+        } catch (IOException | RuntimeException | Error failure) {
+            bodyFailure = failure;
+            throw failure;
+        } finally {
+            closeDecodedBody(decodedBody, bodyFailure, summary);
+        }
+    }
+
+    static void closeDecodedBody(
+            AutoCloseable decodedBody,
+            Throwable primaryFailure,
+            ExportSummary summary
+    ) {
+        if (decodedBody == null) {
+            return;
+        }
+        try {
+            decodedBody.close();
+        } catch (Throwable cleanupFailure) {
+            if (primaryFailure != null) {
+                addSuppressed(primaryFailure, cleanupFailure);
+                return;
             }
-            case CANCELLED -> {
-                summary.markCancelled(0);
-                manifestWriter.write(ManifestRecord.cancelled(action.reason(), 0));
-                indexRows.add(indexRow("cancelled", candidate, "", "", "", action.reason()));
+            if (cleanupFailure instanceof Error error) {
+                throw error;
+            }
+            if (summary != null) {
+                summary.addDiagnostic("decoded temporary file cleanup failed: " + messageOf(cleanupFailure));
             }
         }
     }
 
     private void saveCandidate(
             ExportCandidate candidate,
+            Path decodedBodyPath,
             Path runDirectory,
             ExportOptions options,
-            ManifestWriter manifestWriter,
-            ExportSummary summary,
-            List<ExportIndexRow> indexRows
+            ExportProgressListener listener,
+            ManifestWriter manifest,
+            ExportIndexWriter.Sink index,
+            ExportSummary summary
     ) throws IOException {
         Path outputPath = runDirectory.resolve(candidate.relativePath()).normalize();
         if (!outputPath.startsWith(runDirectory)) {
-            String error = "unsafe output path";
-            summary.incrementFailed(error + " for " + candidate.url());
-            manifestWriter.write(ManifestRecord.failed(candidate, error));
-            indexRows.add(indexRow("failed", candidate, candidate.relativePath().toString(), "", "", error));
+            recordFailure(candidate, "unsafe output path", manifest, index, summary);
             return;
         }
 
+        String outputRelativePath = runDirectory.relativize(outputPath).toString();
+        SavePayload payload = preparePayload(
+                candidate,
+                decodedBodyPath,
+                outputRelativePath,
+                options,
+                listener,
+                manifest,
+                index,
+                summary
+        );
+
         try {
-            Files.createDirectories(outputPath.getParent());
-            String outputRelativePath = runDirectory.relativize(outputPath).toString();
-            SavePayload payload = savePayload(candidate, outputRelativePath, options, manifestWriter, summary, indexRows);
-            Files.write(outputPath, payload.bytes());
-            summary.incrementSaved(candidate.rawByteCount(), payload.bytes().length);
-            manifestWriter.write(ManifestRecord.saved(
+            checkCancelled(listener);
+            if (payload.bytes() == null) {
+                AtomicFiles.copy(decodedBodyPath, outputPath, () -> isCancelled(listener));
+            } else {
+                AtomicFiles.writeBytes(outputPath, payload.bytes());
+            }
+            summary.incrementSaved(candidate.rawByteCount(), payload.byteCount());
+            manifest.write(ManifestRecord.saved(
                     candidate.url(),
                     candidate.method(),
                     candidate.statusCode(),
@@ -279,53 +411,149 @@ public final class ExportService {
                     outputRelativePath,
                     candidate.decoded(),
                     candidate.rawByteCount(),
-                    payload.bytes().length,
+                    payload.byteCount(),
                     payload.sha256(),
                     payload.note()
             ));
-            indexRows.add(indexRow("saved", candidate, outputRelativePath, "", "", payload.note(), payload.bytes().length));
+            index.write(indexRow(
+                    "saved",
+                    candidate,
+                    outputRelativePath,
+                    "",
+                    "",
+                    payload.note(),
+                    payload.byteCount()
+            ));
+        } catch (CancellationException exception) {
+            throw exception;
         } catch (IOException exception) {
-            summary.incrementFailed(exception.getMessage());
-            manifestWriter.write(ManifestRecord.failed(candidate, exception.getMessage()));
-            indexRows.add(indexRow("failed", candidate, candidate.relativePath().toString(), "", "", exception.getMessage()));
+            if (isCancellationRequested(listener, exception)) {
+                throw cancellation(exception);
+            }
+            recordFailure(candidate, message(exception), manifest, index, summary);
         }
     }
 
-    private SavePayload savePayload(
+    private SavePayload preparePayload(
             ExportCandidate candidate,
+            Path decodedBodyPath,
             String outputRelativePath,
             ExportOptions options,
-            ManifestWriter manifestWriter,
-            ExportSummary summary,
-            List<ExportIndexRow> indexRows
+            ExportProgressListener listener,
+            ManifestWriter manifest,
+            ExportIndexWriter.Sink index,
+            ExportSummary summary
     ) throws IOException {
-        byte[] originalBytes = candidate.decodedBody();
-        if (options == null || !options.beautify()) {
-            return new SavePayload(originalBytes, candidate.bodySha256(), candidate.decodeNote());
+        if (!options.beautify()) {
+            return SavePayload.original(candidate);
         }
 
         BeautifyType type = beautifyTypeFor(candidate);
         if (type == null) {
-            return new SavePayload(originalBytes, candidate.bodySha256(), candidate.decodeNote());
+            return SavePayload.original(candidate);
+        }
+
+        if (candidate.savedByteCount() > beautifyMemoryBudget) {
+            String reason = type.label() + " beautify skipped: decoded body "
+                    + candidate.savedByteCount() + " bytes exceeds memory budget "
+                    + beautifyMemoryBudget + " bytes";
+            recordBeautifyFailure(candidate, outputRelativePath, reason, manifest, index, summary);
+            return SavePayload.original(candidate);
         }
 
         try {
-            String source = new String(candidate.decodedBody(), charset(candidate.contentType()));
-            BodyBeautifier.BeautifiedText beautified = bodyBeautifier.beautify(type, source);
+            checkCancelled(listener);
+            byte[] originalBytes = Files.readAllBytes(decodedBodyPath);
+            checkCancelled(listener);
+            String source = new String(originalBytes, charset(candidate.contentType()));
+            BodyBeautifier.BeautifiedText beautified = bodyBeautifier.beautify(
+                    type,
+                    source,
+                    beautifyMemoryBudget,
+                    () -> isCancelled(listener)
+            );
+            checkCancelled(listener);
             byte[] beautifiedBytes = beautified.text().getBytes(StandardCharsets.UTF_8);
+            if (beautifiedBytes.length > beautifyMemoryBudget) {
+                throw new BeautifyLimitException(
+                        "beautified output exceeds budget of "
+                                + beautifyMemoryBudget + " bytes"
+                );
+            }
             summary.incrementBeautified(beautifiedBytes.length);
             return new SavePayload(
                     beautifiedBytes,
+                    beautifiedBytes.length,
                     Hashes.sha256Hex(beautifiedBytes),
                     appendNote(candidate.decodeNote(), "beautified " + type.label() + ": " + beautified.note())
             );
-        } catch (RuntimeException exception) {
-            String error = type.label() + " beautify failed: " + exception.getMessage();
-            summary.incrementBeautifyFailed(error);
-            manifestWriter.write(ManifestRecord.beautifyFailed(candidate, outputRelativePath, error));
-            indexRows.add(indexRow("beautify_failed", candidate, outputRelativePath, "", "", error));
-            return new SavePayload(originalBytes, candidate.bodySha256(), candidate.decodeNote());
+        } catch (CancellationException exception) {
+            throw exception;
+        } catch (IOException | RuntimeException exception) {
+            if (isCancellationRequested(listener, exception)) {
+                throw cancellation(exception);
+            }
+            String reason = type.label() + " beautify failed: " + message(exception);
+            recordBeautifyFailure(candidate, outputRelativePath, reason, manifest, index, summary);
+            return SavePayload.original(candidate);
         }
+    }
+
+    private void recordBeautifyFailure(
+            ExportCandidate candidate,
+            String outputRelativePath,
+            String reason,
+            ManifestWriter manifest,
+            ExportIndexWriter.Sink index,
+            ExportSummary summary
+    ) throws IOException {
+        summary.incrementBeautifyFailed(reason);
+        manifest.write(ManifestRecord.beautifyFailed(candidate, outputRelativePath, reason));
+        index.write(indexRow("beautify_failed", candidate, outputRelativePath, "", "", reason));
+    }
+
+    private void recordFailure(
+            ExportCandidate candidate,
+            String reason,
+            ManifestWriter manifest,
+            ExportIndexWriter.Sink index,
+            ExportSummary summary
+    ) throws IOException {
+        String safeReason = reason == null || reason.isBlank() ? "unknown export failure" : reason;
+        summary.incrementFailed(safeReason);
+        manifest.write(ManifestRecord.failed(candidate, safeReason));
+        index.write(indexRow(
+                "failed",
+                candidate,
+                candidate.relativePath().toString(),
+                "",
+                "",
+                safeReason
+        ));
+    }
+
+    private void recordCancellation(
+            int remaining,
+            ManifestWriter manifest,
+            ExportIndexWriter.Sink index,
+            ExportSummary summary
+    ) throws IOException {
+        int safeRemaining = Math.max(remaining, 0);
+        summary.markCancelled(safeRemaining);
+        manifest.write(ManifestRecord.cancelled("cancelled by user", safeRemaining));
+        index.write(new ExportIndexRow(
+                "cancelled",
+                "",
+                "",
+                -1,
+                "",
+                "",
+                0,
+                "",
+                "",
+                "",
+                "cancelled by user; remaining=" + safeRemaining
+        ));
     }
 
     static boolean isJavascriptCandidate(ExportCandidate candidate) {
@@ -360,32 +588,85 @@ public final class ExportService {
         return null;
     }
 
-    private String appendNote(String existing, String addition) {
-        if (existing == null || existing.isBlank()) {
-            return addition;
+    private Path createRunDirectory(Path outputRoot) throws IOException {
+        if (outputRoot == null) {
+            throw new IOException("output root is required");
         }
-        return existing + "; " + addition;
-    }
+        Path root = outputRoot.toAbsolutePath().normalize();
+        Files.createDirectories(root);
+        String baseName = "extract-file-" + LocalDateTime.now().format(RUN_DIRECTORY_FORMAT);
 
-    private static String normalizedContentType(String contentType) {
-        String value = contentType == null ? "" : contentType;
-        int semicolon = value.indexOf(';');
-        if (semicolon >= 0) {
-            value = value.substring(0, semicolon);
-        }
-        return value.trim().toLowerCase(Locale.ROOT);
-    }
-
-    private Charset charset(String contentType) {
-        Matcher matcher = CHARSET_PATTERN.matcher(contentType == null ? "" : contentType);
-        if (matcher.find()) {
+        for (int suffix = 0; ; suffix++) {
+            String directoryName = suffix == 0 ? baseName : baseName + "-" + suffix;
+            Path candidate = root.resolve(directoryName);
             try {
-                return Charset.forName(matcher.group(1));
-            } catch (RuntimeException ignored) {
-                return StandardCharsets.UTF_8;
+                return Files.createDirectory(candidate).toAbsolutePath().normalize();
+            } catch (FileAlreadyExistsException ignored) {
+                // Another export won the name. Retry with a deterministic suffix.
             }
         }
-        return StandardCharsets.UTF_8;
+    }
+
+    private ExportCandidate failureCandidate(HttpRequestResponse item, int itemIndex) {
+        String method = safeMethod(item);
+        String url = safeUrl(item);
+        int status = safeStatusCode(item);
+        String contentEncoding = "";
+        String contentType = "";
+        String contentDisposition = "";
+        boolean hasResponse = safeHasResponse(item);
+        if (hasResponse) {
+            try {
+                HttpResponse response = item.response();
+                contentEncoding = safeHeader(response, "Content-Encoding");
+                contentType = safeHeader(response, "Content-Type");
+                contentDisposition = safeHeader(response, "Content-Disposition");
+            } catch (RuntimeException ignored) {
+                // The fallback record still identifies the item by method and URL.
+            }
+        }
+
+        Path relativePath;
+        try {
+            relativePath = pathMapper.map(method, url, contentType, contentDisposition);
+        } catch (RuntimeException exception) {
+            relativePath = Path.of("unknown-host", "failed-" + itemIndex + ".bin");
+        }
+        return new ExportCandidate(
+                method,
+                url,
+                hasResponse,
+                status,
+                contentType,
+                contentEncoding,
+                contentDisposition,
+                relativePath,
+                MimeCategory.from(contentType, relativePath),
+                false,
+                "",
+                "",
+                0,
+                0
+        );
+    }
+
+    private ExportCandidate withRelativePath(ExportCandidate candidate, Path relativePath) {
+        return new ExportCandidate(
+                candidate.method(),
+                candidate.url(),
+                candidate.hasResponse(),
+                candidate.statusCode(),
+                candidate.contentType(),
+                candidate.contentEncoding(),
+                candidate.contentDisposition(),
+                relativePath,
+                MimeCategory.from(candidate.contentType(), relativePath),
+                candidate.decoded(),
+                candidate.decodeNote(),
+                candidate.bodySha256(),
+                candidate.rawByteCount(),
+                candidate.savedByteCount()
+        );
     }
 
     private ExportIndexRow indexRow(
@@ -396,7 +677,15 @@ public final class ExportService {
             String duplicateOfUrl,
             String reason
     ) {
-        return indexRow(action, candidate, outputPath, duplicateOfPath, duplicateOfUrl, reason, candidate.savedByteCount());
+        return indexRow(
+                action,
+                candidate,
+                outputPath,
+                duplicateOfPath,
+                duplicateOfUrl,
+                reason,
+                candidate.savedByteCount()
+        );
     }
 
     private ExportIndexRow indexRow(
@@ -423,28 +712,6 @@ public final class ExportService {
         );
     }
 
-    private record SavePayload(byte[] bytes, String sha256, String note) {
-    }
-
-    private void publishProgress(
-            ExportProgressListener listener,
-            int processed,
-            int total,
-            String currentUrl,
-            ExportSummary summary
-    ) {
-        listener.onProgress(new ExportProgress(
-                processed,
-                total,
-                currentUrl,
-                summary.savedCount(),
-                summary.skippedCount(),
-                summary.duplicateCount(),
-                summary.failedCount(),
-                summary.cancelled()
-        ));
-    }
-
     private String safeMethod(HttpRequestResponse item) {
         try {
             return item.request().method();
@@ -463,7 +730,7 @@ public final class ExportService {
 
     private int safeStatusCode(HttpRequestResponse item) {
         try {
-            if (item.hasResponse() && item.response() != null) {
+            if (item != null && item.hasResponse() && item.response() != null) {
                 return item.response().statusCode();
             }
         } catch (RuntimeException ignored) {
@@ -472,11 +739,236 @@ public final class ExportService {
         return -1;
     }
 
+    private boolean safeHasResponse(HttpRequestResponse item) {
+        try {
+            return item != null && item.hasResponse() && item.response() != null;
+        } catch (RuntimeException exception) {
+            return false;
+        }
+    }
+
+    private boolean hasUsableResponse(HttpRequestResponse item) {
+        if (item == null) {
+            throw new IllegalArgumentException("search item is null");
+        }
+        return item.hasResponse() && item.response() != null;
+    }
+
+    private String safeHeader(HttpResponse response, String name) {
+        try {
+            String value = response == null ? null : response.headerValue(name);
+            return value == null ? "" : value;
+        } catch (RuntimeException exception) {
+            return "";
+        }
+    }
+
+    private Charset charset(String contentType) {
+        Matcher matcher = CHARSET_PATTERN.matcher(contentType == null ? "" : contentType);
+        if (matcher.find()) {
+            try {
+                return Charset.forName(matcher.group(1));
+            } catch (RuntimeException ignored) {
+                return StandardCharsets.UTF_8;
+            }
+        }
+        return StandardCharsets.UTF_8;
+    }
+
+    private String appendNote(String existing, String addition) {
+        if (existing == null || existing.isBlank()) {
+            return addition;
+        }
+        return existing + "; " + addition;
+    }
+
+    private static String normalizedContentType(String contentType) {
+        String value = contentType == null ? "" : contentType;
+        int semicolon = value.indexOf(';');
+        if (semicolon >= 0) {
+            value = value.substring(0, semicolon);
+        }
+        return value.trim().toLowerCase(Locale.ROOT);
+    }
+
     private void writeSummary(Path runDirectory, ExportSummary summary) throws IOException {
-        Files.writeString(
+        AtomicFiles.writeString(
                 runDirectory.resolve("extract_summary.txt"),
                 summary.toSummaryFileText(),
                 StandardCharsets.UTF_8
         );
+    }
+
+    private void addTerminalDiagnostic(
+            ExportSummary summary,
+            String phase,
+            String outcome,
+            int processed,
+            int total,
+            Throwable primaryFailure
+    ) {
+        try {
+            Runtime runtime = Runtime.getRuntime();
+            long heapUsedMiB = (runtime.totalMemory() - runtime.freeMemory()) / (1024 * 1024);
+            long heapMaxMiB = runtime.maxMemory() / (1024 * 1024);
+            String diagnostic = "terminal outcome=" + outcome
+                    + " phase=" + phase
+                    + " processed=" + Math.max(processed, 0)
+                    + " total=" + Math.max(total, 0)
+                    + " heapUsedMiB=" + heapUsedMiB
+                    + " heapMaxMiB=" + heapMaxMiB
+                    + " saved=" + summary.savedCount()
+                    + " skipped=" + summary.skippedCount()
+                    + " duplicate=" + summary.duplicateCount()
+                    + " failed=" + summary.failedCount();
+            if ("success".equals(outcome)) {
+                summary.setTerminalDiagnostic(diagnostic);
+            } else {
+                summary.addTerminalDiagnostic(diagnostic);
+            }
+        } catch (Throwable diagnosticFailure) {
+            if (primaryFailure != null) {
+                addSuppressed(primaryFailure, diagnosticFailure);
+            }
+        }
+    }
+
+    private void logFatalDiagnostic(ExportSummary summary, Throwable primaryFailure) {
+        if (api == null) {
+            return;
+        }
+        try {
+            var logging = api.logging();
+            if (logging != null) {
+                logging.logToError(
+                        "Extractor " + summary.terminalDiagnostic()
+                                + " error=" + primaryFailure.getClass().getName()
+                                + " message=" + messageOf(primaryFailure)
+                );
+            }
+        } catch (Throwable loggingFailure) {
+            addSuppressed(primaryFailure, loggingFailure);
+        }
+    }
+
+    private boolean isCancelled(ExportProgressListener listener) {
+        return Thread.currentThread().isInterrupted() || listener.isCancelled();
+    }
+
+    private void checkCancelled(ExportProgressListener listener) {
+        if (isCancelled(listener)) {
+            throw new CancellationException("cancelled by user");
+        }
+    }
+
+    private boolean isCancellationRequested(
+            ExportProgressListener listener,
+            Throwable failure
+    ) {
+        if (failure instanceof CancellationException
+                || Thread.currentThread().isInterrupted()
+                || causedByClosedInterrupt(failure)) {
+            return true;
+        }
+        return listener != null && listener.isCancelled();
+    }
+
+    private boolean clearCancellationInterrupt(Throwable failure) {
+        boolean interrupted = Thread.interrupted();
+        return interrupted || causedByClosedInterrupt(failure);
+    }
+
+    private boolean causedByClosedInterrupt(Throwable failure) {
+        Throwable current = failure;
+        while (current != null) {
+            if (current instanceof ClosedByInterruptException) {
+                return true;
+            }
+            current = current.getCause();
+        }
+        return false;
+    }
+
+    private CancellationException cancellation(Throwable failure) {
+        CancellationException cancellation = new CancellationException("cancelled by user");
+        cancellation.initCause(failure);
+        return cancellation;
+    }
+
+    private String message(Throwable throwable) {
+        return messageOf(throwable);
+    }
+
+    private static String messageOf(Throwable throwable) {
+        String value = throwable.getMessage();
+        return value == null || value.isBlank() ? throwable.getClass().getSimpleName() : value;
+    }
+
+    private static void addSuppressed(Throwable primary, Throwable secondary) {
+        if (primary != secondary) {
+            primary.addSuppressed(secondary);
+        }
+    }
+
+    private static void throwFailure(Throwable failure) throws IOException {
+        if (failure instanceof IOException ioException) {
+            throw ioException;
+        }
+        if (failure instanceof RuntimeException runtimeException) {
+            throw runtimeException;
+        }
+        if (failure instanceof Error error) {
+            throw error;
+        }
+        throw new IOException("extractor run failed", failure);
+    }
+
+    @FunctionalInterface
+    private interface ItemSource {
+        List<HttpRequestResponse> load(ExportProgressListener listener);
+    }
+
+    private record SavePayload(byte[] bytes, long byteCount, String sha256, String note) {
+        private static SavePayload original(ExportCandidate candidate) {
+            return new SavePayload(
+                    null,
+                    candidate.savedByteCount(),
+                    candidate.bodySha256(),
+                    candidate.decodeNote()
+            );
+        }
+    }
+
+    private static final class ProgressPublisher {
+        private final ExportProgressListener listener;
+        private long lastPublishedAt = Long.MIN_VALUE;
+
+        private ProgressPublisher(ExportProgressListener listener) {
+            this.listener = listener;
+        }
+
+        private void publish(
+                int processed,
+                int total,
+                String currentUrl,
+                ExportSummary summary,
+                boolean force
+        ) {
+            long now = System.nanoTime();
+            if (!force && processed < total && now - lastPublishedAt < PROGRESS_INTERVAL_NANOS) {
+                return;
+            }
+            lastPublishedAt = now;
+            listener.onProgress(new ExportProgress(
+                    processed,
+                    total,
+                    currentUrl,
+                    summary.savedCount(),
+                    summary.skippedCount(),
+                    summary.duplicateCount(),
+                    summary.failedCount(),
+                    summary.cancelled()
+            ));
+        }
     }
 }

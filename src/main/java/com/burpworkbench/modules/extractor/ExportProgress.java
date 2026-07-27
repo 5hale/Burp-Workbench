@@ -1,6 +1,6 @@
 package com.burpworkbench.modules.extractor;
 
-public record ExportProgress(
+record ExportProgress(
         int processed,
         int total,
         String currentUrl,
@@ -11,4 +11,3 @@ public record ExportProgress(
         boolean cancelled
 ) {
 }
-

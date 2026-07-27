@@ -1,6 +1,6 @@
 package com.burpworkbench.modules.search;
 
-public enum SearchMode {
+enum SearchMode {
     TEXT,
     HEX
 }

@@ -1,23 +1,28 @@
 package com.burpworkbench.modules.extractor;
 
+import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
 
-public final class DuplicateIndex {
-    private final Map<String, ExportCandidate> firstByHash = new HashMap<>();
+final class DuplicateIndex {
+    private final Map<String, DuplicateReference> firstByHash = new HashMap<>();
 
-    public Optional<ExportCandidate> findDuplicate(ExportCandidate candidate) {
-        if (!candidate.hasResponse()) {
-            return Optional.empty();
-        }
+    Optional<DuplicateReference> find(String sha256) {
+        return Optional.ofNullable(firstByHash.get(sha256));
+    }
 
-        ExportCandidate existing = firstByHash.get(candidate.bodySha256());
-        if (existing == null) {
-            firstByHash.put(candidate.bodySha256(), candidate);
-            return Optional.empty();
-        }
-        return Optional.of(existing);
+    void rememberFirst(String sha256, Path relativePath, String url) {
+        firstByHash.putIfAbsent(
+                sha256,
+                new DuplicateReference(relativePath == null ? "" : relativePath.toString(), url == null ? "" : url)
+        );
+    }
+
+    int size() {
+        return firstByHash.size();
+    }
+
+    record DuplicateReference(String relativePath, String url) {
     }
 }
-

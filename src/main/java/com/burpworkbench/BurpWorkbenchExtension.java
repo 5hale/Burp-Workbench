@@ -7,13 +7,17 @@ import com.burpworkbench.modules.search.SearchPlusModule;
 import com.burpworkbench.platform.ModuleRegistry;
 
 public final class BurpWorkbenchExtension implements BurpExtension {
+    private ModuleRegistry registry;
+
     @Override
     public void initialize(MontoyaApi api) {
         api.extension().setName("Burp Workbench");
-        ModuleRegistry registry = new ModuleRegistry(api);
-        registry.register(new ExtractorModule());
-        registry.register(new SearchPlusModule());
-        registry.start();
+        ExtractorModule extractor = new ExtractorModule();
+        ModuleRegistry newRegistry = new ModuleRegistry(api);
+        newRegistry.register(extractor);
+        newRegistry.register(new SearchPlusModule(extractor.extractionHandler()));
+        registry = newRegistry;
+        newRegistry.start();
         api.logging().logToOutput("Burp Workbench loaded. Modules: Extractor, Search++.");
     }
 }
