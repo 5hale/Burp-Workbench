@@ -2,14 +2,38 @@
 
 Burp Workbench는 공통 core 위에 여러 워크플로우 모듈을 묶은 단일 jar Burp Suite 확장입니다.
 
-현재 버전: `0.4.4`
+현재 버전: `0.4.5`
 
 ## 모듈
 
 - `Extractor`: 선택한 Burp HTTP 응답을 manifest, index, summary, 중복 처리, 선택적 JS/JSON beautify와 함께 로컬 파일로 추출합니다.
 - `Search++`: Burp HTTP 메시지를 검색하는 탭 기반 고급 검색 창이며, 선택한 결과를 Extractor로 넘겨 추출할 수 있습니다.
 
-## 0.4.4
+## 지원 Burp 버전
+
+Burp Workbench `0.4.5`의 공식 지원 범위는 Burp Suite
+`2025.9.3` 이상부터 `2026.7.1` 이하까지입니다.
+
+| Burp Suite 버전 | Proxy 호환 모드 | 지원 여부 |
+|---|---|---|
+| `2025.9.3` | `LEGACY_METADATA` | 지원 |
+| `2025.10` 이상 ~ `2026.7.1` 이하 | `HISTORY_ID` | 지원 |
+| `2025.9.3` 미만 | — | 지원하지 않음 |
+| `2026.7.1` 초과 | 런타임 기능 자동 탐지 | `0.4.5` 보장 범위 밖 |
+
+지원 범위 안에서는 모두 같은 배포 jar를 사용합니다. 호환 모드는
+자동으로 선택되며 사용자가 별도로 설정할 필요가 없습니다. extension은
+Montoya API `2025.8`을 기준으로 컴파일하고, Montoya 의존성은
+`provided`이므로 배포 jar에 포함하지 않습니다.
+
+`2026.7.1`보다 최신인 Burp도 Montoya API 호환성이 유지되면 동작할
+수 있지만, 별도 검증 전에는 `0.4.5`의 공식 보장 범위에 포함하지
+않습니다.
+
+호환성 matrix와 검증 상태는
+`docs/compatibility-0.4.5-verification.md`에서 확인할 수 있습니다.
+
+## 현재 동작 기준
 
 - Search++는 소스를 partition 단위로 처리하고 여러 창의 source scan을 하나씩 실행하며, 검색 취소와 malformed item·정규식 timeout 격리를 지원합니다.
 - Extractor는 응답 body를 순차 처리하고 decoded body를 임시 파일로 streaming하며, Beautify 메모리 예산을 넘으면 decoded 원문을 그대로 저장합니다.
@@ -28,10 +52,10 @@ Extractor 기본 안전 한도는 decoded body 512 MiB, Beautify 대상 8 MiB입
 프로젝트를 빌드한 뒤 아래 shaded jar를 Burp Suite에 로드합니다.
 
 ```text
-target\burp-workbench-extension-0.4.4.jar
+target\burp-workbench-extension-0.4.5.jar
 ```
 
-`original-burp-workbench-extension-0.4.4.jar`는 설치하지 마세요. 이 파일은 Maven이 남기는 unshaded backup이며 Brotli/Rhino 같은 번들 런타임 의존성이 포함되지 않습니다.
+이 단일 shaded jar가 지원하는 모든 Burp 버전의 공통 배포 파일입니다. `target\original-burp-workbench-extension-0.4.5.jar`는 설치하지 마세요. 이 파일은 Maven이 남기는 unshaded backup이며 Brotli/Rhino 같은 번들 런타임 의존성이 포함되지 않습니다.
 
 ## 빌드
 
@@ -40,7 +64,7 @@ target\burp-workbench-extension-0.4.4.jar
 - JDK 17 이상
 - Maven
 - 최초 dependency resolution을 위한 네트워크 접근
-- Montoya API를 지원하는 Burp Suite
+- Burp Suite `2025.9.3` 이상 ~ `2026.7.1` 이하
 
 ```powershell
 mvn test
@@ -50,9 +74,11 @@ mvn clean package
 예상 빌드 산출물:
 
 ```text
-target\burp-workbench-extension-0.4.4.jar
-target\original-burp-workbench-extension-0.4.4.jar
+target\burp-workbench-extension-0.4.5.jar
+target\original-burp-workbench-extension-0.4.5.jar
 ```
+
+Burp에 로드할 배포 산출물은 `target\burp-workbench-extension-0.4.5.jar` 하나뿐입니다.
 
 ## 아키텍처
 

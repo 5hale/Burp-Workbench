@@ -9,6 +9,7 @@ import burp.api.montoya.proxy.ProxyHttpRequestResponse;
 import java.time.ZonedDateTime;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -34,6 +35,7 @@ final class SearchSourceScanner {
     private volatile List<SelectionScope> contextScopes;
     private final RepeaterCache repeaterCache;
     private final Function<ProxyHttpRequestResponse, HttpRequestResponse> proxyRequestResponseFactory;
+    private final ProxyHistoryPartitioner proxyHistoryPartitioner;
     private final AtomicLong scannedItems = new AtomicLong();
     private final AtomicLong matchedItems = new AtomicLong();
     private final AtomicInteger malformedItems = new AtomicInteger();
@@ -51,7 +53,8 @@ final class SearchSourceScanner {
                 contextExchanges,
                 contextScopes,
                 repeaterCache,
-                HttpExchangeFactory::requestResponseFromProxyItem
+                HttpExchangeFactory::requestResponseFromProxyItem,
+                ProxyHistoryPartitioner.runtime()
         );
     }
 
@@ -62,11 +65,36 @@ final class SearchSourceScanner {
             RepeaterCache repeaterCache,
             Function<ProxyHttpRequestResponse, HttpRequestResponse> proxyRequestResponseFactory
     ) {
+        this(
+                api,
+                contextExchanges,
+                contextScopes,
+                repeaterCache,
+                proxyRequestResponseFactory,
+                ProxyHistoryPartitioner.runtime()
+        );
+    }
+
+    SearchSourceScanner(
+            MontoyaApi api,
+            List<HttpExchange> contextExchanges,
+            List<SelectionScope> contextScopes,
+            RepeaterCache repeaterCache,
+            Function<ProxyHttpRequestResponse, HttpRequestResponse> proxyRequestResponseFactory,
+            ProxyHistoryPartitioner proxyHistoryPartitioner
+    ) {
         this.api = api;
         this.contextExchanges = contextExchanges == null ? List.of() : List.copyOf(contextExchanges);
         this.contextScopes = contextScopes == null ? List.of() : List.copyOf(contextScopes);
         this.repeaterCache = repeaterCache;
-        this.proxyRequestResponseFactory = proxyRequestResponseFactory;
+        this.proxyRequestResponseFactory = Objects.requireNonNull(
+                proxyRequestResponseFactory,
+                "proxyRequestResponseFactory"
+        );
+        this.proxyHistoryPartitioner = Objects.requireNonNull(
+                proxyHistoryPartitioner,
+                "proxyHistoryPartitioner"
+        );
     }
 
     ScanStatistics scan(
@@ -227,7 +255,7 @@ final class SearchSourceScanner {
             try {
                 ensureNotCancelled(cancellation);
                 if (item == null
-                        || partitionFor(item.id()) != partition
+                        || proxyHistoryPartitioner.partition(item, PARTITION_COUNT) != partition
                         || (!contextScopes.isEmpty() && !matchesContextScope(proxyItemUrl(item)))) {
                     return false;
                 }

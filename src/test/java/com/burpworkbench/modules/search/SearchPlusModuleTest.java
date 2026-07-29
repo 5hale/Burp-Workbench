@@ -9,8 +9,21 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SearchPlusModuleTest {
+    @Test
+    void compatibilityLogContainsAllRequiredRuntimeFacts() {
+        String log = SearchPlusModule.compatibilityLogLine(
+                "2025.9.3",
+                ProxyHistoryPartitioner.Mode.LEGACY_METADATA
+        );
+
+        assertTrue(log.contains("burpVersion=2025.9.3"));
+        assertTrue(log.contains("proxyPartitionMode=LEGACY_METADATA"));
+        assertTrue(log.contains("montoyaCompileBaseline=2025.8"));
+    }
+
     @Test
     void startupRollbackClosesCreatedResourcesInRequiredOrder() {
         List<String> events = new ArrayList<>();

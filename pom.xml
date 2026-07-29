@@ -6,7 +6,7 @@
 
     <groupId>com.burpworkbench</groupId>
     <artifactId>burp-workbench-extension</artifactId>
-    <version>0.4.4</version>
+    <version>0.4.5</version>
     <packaging>jar</packaging>
 
     <name>Burp Workbench</name>
@@ -15,7 +15,8 @@
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <maven.compiler.release>17</maven.compiler.release>
-        <montoya.version>2025.12</montoya.version>
+        <montoya.version>2025.8</montoya.version>
+        <workbench.build.directory>${project.basedir}/target</workbench.build.directory>
         <rhino.version>1.8.0</rhino.version>
         <junit.version>5.13.4</junit.version>
     </properties>
@@ -46,6 +47,7 @@
     </dependencies>
 
     <build>
+        <directory>${workbench.build.directory}</directory>
         <finalName>burp-workbench-extension-${project.version}</finalName>
         <plugins>
             <plugin>

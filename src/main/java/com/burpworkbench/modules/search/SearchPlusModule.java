@@ -10,6 +10,8 @@ import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class SearchPlusModule implements WorkbenchModule {
+    static final String MONTOYA_COMPILE_BASELINE = "2025.8";
+
     private final ExtractionHandler extractionHandler;
 
     public SearchPlusModule(ExtractionHandler extractionHandler) {
@@ -23,6 +25,14 @@ public final class SearchPlusModule implements WorkbenchModule {
 
     @Override
     public void initialize(ModuleContext context, ModuleLifetime lifetime) {
+        ProxyHistoryPartitioner proxyHistoryPartitioner =
+                ProxyHistoryPartitioner.runtime();
+        context.api().logging().logToOutput(
+                compatibilityLogLine(
+                        readBurpVersion(context),
+                        proxyHistoryPartitioner.mode()
+                )
+        );
         RepeaterCache repeaterCache = new RepeaterCache();
         SearchExecutionCoordinator coordinator = lifetime.own(new SearchExecutionCoordinator());
         SearchPlusContextMenuProvider provider = lifetime.own(new SearchPlusContextMenuProvider(
@@ -38,6 +48,26 @@ public final class SearchPlusModule implements WorkbenchModule {
                 context.api().userInterface().registerContextMenuItemsProvider(provider);
         resources.own(registration);
         installer.install();
+    }
+
+    static String compatibilityLogLine(
+            String burpVersion,
+            ProxyHistoryPartitioner.Mode mode
+    ) {
+        String safeBurpVersion =
+                burpVersion == null || burpVersion.isBlank() ? "unknown" : burpVersion;
+        return "Search++ compatibility: burpVersion=" + safeBurpVersion
+                + " proxyPartitionMode=" + mode
+                + " montoyaCompileBaseline=" + MONTOYA_COMPILE_BASELINE;
+    }
+
+    private static String readBurpVersion(ModuleContext context) {
+        try {
+            Object version = context.api().burpSuite().version();
+            return version == null ? "unknown" : version.toString();
+        } catch (RuntimeException exception) {
+            return "unknown";
+        }
     }
 
     /**
