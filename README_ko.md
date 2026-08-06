@@ -2,7 +2,7 @@
 
 Burp Workbench는 공통 core 위에 여러 워크플로우 모듈을 묶은 단일 jar Burp Suite 확장입니다.
 
-현재 버전: `0.4.5`
+현재 버전: `0.4.6`
 
 ## 모듈
 
@@ -11,7 +11,7 @@ Burp Workbench는 공통 core 위에 여러 워크플로우 모듈을 묶은 단
 
 ## 지원 Burp 버전
 
-Burp Workbench `0.4.5`의 공식 지원 범위는 Burp Suite
+Burp Workbench `0.4.6`의 공식 지원 범위는 Burp Suite
 `2025.9.3` 이상부터 `2026.7.1` 이하까지입니다.
 
 | Burp Suite 버전 | Proxy 호환 모드 | 지원 여부 |
@@ -19,7 +19,7 @@ Burp Workbench `0.4.5`의 공식 지원 범위는 Burp Suite
 | `2025.9.3` | `LEGACY_METADATA` | 지원 |
 | `2025.10` 이상 ~ `2026.7.1` 이하 | `HISTORY_ID` | 지원 |
 | `2025.9.3` 미만 | — | 지원하지 않음 |
-| `2026.7.1` 초과 | 런타임 기능 자동 탐지 | `0.4.5` 보장 범위 밖 |
+| `2026.7.1` 초과 | 런타임 기능 자동 탐지 | `0.4.6` 보장 범위 밖 |
 
 지원 범위 안에서는 모두 같은 배포 jar를 사용합니다. 호환 모드는
 자동으로 선택되며 사용자가 별도로 설정할 필요가 없습니다. extension은
@@ -27,7 +27,7 @@ Montoya API `2025.8`을 기준으로 컴파일하고, Montoya 의존성은
 `provided`이므로 배포 jar에 포함하지 않습니다.
 
 `2026.7.1`보다 최신인 Burp도 Montoya API 호환성이 유지되면 동작할
-수 있지만, 별도 검증 전에는 `0.4.5`의 공식 보장 범위에 포함하지
+수 있지만, 별도 검증 전에는 `0.4.6`의 공식 보장 범위에 포함하지
 않습니다.
 
 호환성 matrix와 검증 상태는
@@ -52,10 +52,10 @@ Extractor 기본 안전 한도는 decoded body 512 MiB, Beautify 대상 8 MiB입
 프로젝트를 빌드한 뒤 아래 shaded jar를 Burp Suite에 로드합니다.
 
 ```text
-target\burp-workbench-extension-0.4.5.jar
+target\burp-workbench-extension-0.4.6.jar
 ```
 
-이 단일 shaded jar가 지원하는 모든 Burp 버전의 공통 배포 파일입니다. `target\original-burp-workbench-extension-0.4.5.jar`는 설치하지 마세요. 이 파일은 Maven이 남기는 unshaded backup이며 Brotli/Rhino 같은 번들 런타임 의존성이 포함되지 않습니다.
+이 단일 shaded jar가 지원하는 모든 Burp 버전의 공통 배포 파일입니다. `target\original-burp-workbench-extension-0.4.6.jar`는 설치하지 마세요. 이 파일은 Maven이 남기는 unshaded backup이며 Brotli/Rhino 같은 번들 런타임 의존성이 포함되지 않습니다.
 
 ## 빌드
 
@@ -74,11 +74,11 @@ mvn clean package
 예상 빌드 산출물:
 
 ```text
-target\burp-workbench-extension-0.4.5.jar
-target\original-burp-workbench-extension-0.4.5.jar
+target\burp-workbench-extension-0.4.6.jar
+target\original-burp-workbench-extension-0.4.6.jar
 ```
 
-Burp에 로드할 배포 산출물은 `target\burp-workbench-extension-0.4.5.jar` 하나뿐입니다.
+Burp에 로드할 배포 산출물은 `target\burp-workbench-extension-0.4.6.jar` 하나뿐입니다.
 
 ## 아키텍처
 

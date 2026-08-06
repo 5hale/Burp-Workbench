@@ -2,7 +2,7 @@
 
 Burp Workbench is a single-jar Burp Suite extension that groups workflow modules around a shared core.
 
-Current version: `0.4.5`
+Current version: `0.4.6`
 
 ## Modules
 
@@ -11,7 +11,7 @@ Current version: `0.4.5`
 
 ## Supported Burp versions
 
-Burp Workbench `0.4.5` supports Burp Suite versions from `2025.9.3`
+Burp Workbench `0.4.6` supports Burp Suite versions from `2025.9.3`
 through `2026.7.1`, inclusive.
 
 | Burp Suite version | Proxy compatibility mode | Support |
@@ -19,7 +19,7 @@ through `2026.7.1`, inclusive.
 | `2025.9.3` | `LEGACY_METADATA` | Supported |
 | `2025.10` through `2026.7.1` | `HISTORY_ID` | Supported |
 | Earlier than `2025.9.3` | — | Not supported |
-| Later than `2026.7.1` | Runtime capability detection | Not yet guaranteed by version `0.4.5` |
+| Later than `2026.7.1` | Runtime capability detection | Not yet guaranteed by version `0.4.6` |
 
 Every supported version uses the same distribution jar. Compatibility mode
 selection is automatic and does not require a user setting. The extension is
@@ -51,10 +51,10 @@ The memory reduction has explicit trade-offs: Target/Proxy keep the existing 32-
 Build the project and load this shaded jar in Burp Suite:
 
 ```text
-target\burp-workbench-extension-0.4.5.jar
+target\burp-workbench-extension-0.4.6.jar
 ```
 
-This single shaded jar is the distribution for every supported Burp version. Do not install `target\original-burp-workbench-extension-0.4.5.jar`; that file is Maven's unshaded backup and does not include bundled runtime dependencies such as Brotli/Rhino.
+This single shaded jar is the distribution for every supported Burp version. Do not install `target\original-burp-workbench-extension-0.4.6.jar`; that file is Maven's unshaded backup and does not include bundled runtime dependencies such as Brotli/Rhino.
 
 ## Build
 
@@ -73,11 +73,11 @@ mvn clean package
 Expected build outputs:
 
 ```text
-target\burp-workbench-extension-0.4.5.jar
-target\original-burp-workbench-extension-0.4.5.jar
+target\burp-workbench-extension-0.4.6.jar
+target\original-burp-workbench-extension-0.4.6.jar
 ```
 
-Only `target\burp-workbench-extension-0.4.5.jar` is a loadable distribution artifact.
+Only `target\burp-workbench-extension-0.4.6.jar` is a loadable distribution artifact.
 
 ## Architecture
 

@@ -4,6 +4,7 @@ import burp.api.montoya.core.ByteArray;
 import burp.api.montoya.http.message.HttpRequestResponse;
 import burp.api.montoya.http.message.requests.HttpRequest;
 import burp.api.montoya.http.message.responses.HttpResponse;
+import com.burpworkbench.core.filter.MimeCategory;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Proxy;
@@ -15,6 +16,7 @@ import java.util.Set;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.atomic.AtomicLong;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -47,6 +49,82 @@ class SearchFilterPlanTest {
         );
 
         assertFalse(plan.evaluate(result(404, "body")).visible());
+    }
+
+    @Test
+    void sameEndpointTransactionsRefilterIndependentlyWithoutRescan() {
+        List<SearchResult> canonicalResults = List.of(
+                result(200, "{\"secret\":true}", "application/json"),
+                result(404, "<html>public</html>", "text/html"),
+                noResponseResult("request-only")
+        );
+
+        assertArrayEquals(
+                new int[]{0, 1, 2},
+                evaluateAll(canonicalResults, filterOptions(true, Set.of()), null)
+        );
+        assertArrayEquals(
+                new int[]{0},
+                evaluateAll(canonicalResults, filterOptions(false, Set.of("2xx")), null)
+        );
+        assertArrayEquals(
+                new int[]{1},
+                evaluateAll(canonicalResults, filterOptions(false, Set.of("4xx")), null)
+        );
+        assertArrayEquals(
+                new int[]{0, 1, 2},
+                evaluateAll(canonicalResults, filterOptions(true, Set.of()), null)
+        );
+        assertArrayEquals(
+                new int[]{0},
+                evaluateAll(
+                        canonicalResults,
+                        filterOptions(true, Set.of(), true, Set.of(MimeCategory.JSON)),
+                        null
+                )
+        );
+        assertArrayEquals(
+                new int[]{1},
+                evaluateAll(
+                        canonicalResults,
+                        filterOptions(true, Set.of(), true, Set.of(MimeCategory.HTML)),
+                        null
+                )
+        );
+        assertArrayEquals(
+                new int[]{1, 2},
+                evaluateAll(
+                        canonicalResults,
+                        filterOptions(true, Set.of()),
+                        negativeTextOptions("secret")
+                )
+        );
+        assertArrayEquals(
+                new int[]{0},
+                evaluateAll(
+                        canonicalResults,
+                        filterOptions(
+                                false,
+                                Set.of("2xx"),
+                                true,
+                                Set.of(MimeCategory.JSON)
+                        ),
+                        null
+                )
+        );
+        assertArrayEquals(
+                new int[0],
+                evaluateAll(
+                        canonicalResults,
+                        filterOptions(
+                                false,
+                                Set.of("2xx"),
+                                true,
+                                Set.of(MimeCategory.JSON)
+                        ),
+                        negativeTextOptions("secret")
+                )
+        );
     }
 
     @Test
@@ -126,6 +204,15 @@ class SearchFilterPlanTest {
             boolean allStatus,
             Set<String> statuses
     ) {
+        return filterOptions(allStatus, statuses, false, Set.of());
+    }
+
+    private SearchOptions filterOptions(
+            boolean allStatus,
+            Set<String> statuses,
+            boolean mimeFilterEnabled,
+            Set<MimeCategory> mimeCategories
+    ) {
         return new SearchOptions(
                 "",
                 SearchMode.TEXT,
@@ -142,6 +229,30 @@ class SearchFilterPlanTest {
                 false,
                 allStatus,
                 statuses,
+                mimeFilterEnabled,
+                mimeCategories,
+                Set.of(),
+                Set.of()
+        );
+    }
+
+    private SearchOptions negativeTextOptions(String query) {
+        return new SearchOptions(
+                query,
+                SearchMode.TEXT,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                true,
+                false,
+                false,
+                false,
+                false,
+                true,
+                Set.of(),
                 false,
                 Set.of(),
                 Set.of(),
@@ -174,12 +285,30 @@ class SearchFilterPlanTest {
     }
 
     private SearchResult result(int status, String bodyText) {
+        return result(status, bodyText, "text/plain; charset=utf-8", true);
+    }
+
+    private SearchResult result(int status, String bodyText, String contentType) {
+        return result(status, bodyText, contentType, true);
+    }
+
+    private SearchResult noResponseResult(String bodyText) {
+        return result(0, bodyText, "", false);
+    }
+
+    private SearchResult result(
+            int status,
+            String bodyText,
+            String contentType,
+            boolean hasResponse
+    ) {
         byte[] body = bodyText.getBytes(StandardCharsets.UTF_8);
         ByteArray bodyBytes = proxy(ByteArray.class, (method, args) ->
                 switch (method.getName()) {
                     case "length" -> body.length;
                     case "getByte" -> body[(int) args[0]];
                     case "getBytes" -> body.clone();
+                    case "indexOf" -> byteIndexOf(body, args);
                     default -> defaultValue(method.getReturnType());
                 });
         HttpRequest request = proxy(HttpRequest.class, (method, args) ->
@@ -196,15 +325,15 @@ class SearchFilterPlanTest {
                     case "statusCode" -> (short) status;
                     case "body", "toByteArray" -> bodyBytes;
                     case "bodyOffset" -> 0;
-                    case "headerValue" -> "text/plain; charset=utf-8";
+                    case "headerValue" -> contentType;
                     default -> defaultValue(method.getReturnType());
                 });
         HttpRequestResponse requestResponse = proxy(
                 HttpRequestResponse.class,
                 (method, args) -> switch (method.getName()) {
                     case "request" -> request;
-                    case "response" -> response;
-                    case "hasResponse" -> true;
+                    case "response" -> hasResponse ? response : null;
+                    case "hasResponse" -> hasResponse;
                     default -> defaultValue(method.getReturnType());
                 }
         );
@@ -213,6 +342,52 @@ class SearchFilterPlanTest {
                 "Text",
                 body.length
         );
+    }
+
+    private int[] evaluateAll(
+            List<SearchResult> results,
+            SearchOptions filterOptions,
+            SearchOptions negativeOptions
+    ) {
+        return new SearchFilterPlan(
+                99,
+                new SearchEngine(),
+                filterOptions,
+                negativeOptions
+        ).evaluateAll(results).visibleIndices();
+    }
+
+    private int byteIndexOf(byte[] haystack, Object[] arguments) {
+        byte[] needle = String.valueOf(arguments[0]).getBytes(StandardCharsets.UTF_8);
+        boolean caseSensitive = (boolean) arguments[1];
+        int start = Math.max(0, (int) arguments[2]);
+        int end = Math.min(haystack.length, (int) arguments[3]);
+        int lastStart = end - needle.length;
+        for (int index = start; index <= lastStart; index++) {
+            boolean matched = true;
+            for (int offset = 0; offset < needle.length; offset++) {
+                byte actual = haystack[index + offset];
+                byte expected = needle[offset];
+                if (!caseSensitive) {
+                    actual = asciiLowercase(actual);
+                    expected = asciiLowercase(expected);
+                }
+                if (actual != expected) {
+                    matched = false;
+                    break;
+                }
+            }
+            if (matched) {
+                return index;
+            }
+        }
+        return -1;
+    }
+
+    private byte asciiLowercase(byte value) {
+        return value >= 'A' && value <= 'Z'
+                ? (byte) (value + ('a' - 'A'))
+                : value;
     }
 
     private String bodyText(SearchResult result) {

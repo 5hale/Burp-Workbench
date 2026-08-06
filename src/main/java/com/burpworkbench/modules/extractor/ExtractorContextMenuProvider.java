@@ -22,6 +22,7 @@ import java.awt.Component;
 import java.awt.FlowLayout;
 import java.awt.Frame;
 import java.io.File;
+import java.io.IOException;
 import java.nio.file.Path;
 import java.util.Collections;
 import java.util.List;
@@ -100,11 +101,14 @@ final class ExtractorContextMenuProvider implements ContextMenuItemsProvider, Au
         if (closed) {
             return false;
         }
+        List<HttpRequestResponse> selectionSnapshot = selectedItems == null
+                ? List.of()
+                : List.copyOf(selectedItems);
         ExportRequest request = chooseExportRequest();
         if (request == null || closed) {
             return false;
         }
-        if (!runExport(selectedItems, false, request)) {
+        if (!runResolvedExport(selectionSnapshot, request)) {
             return false;
         }
         api.logging().logToOutput("Search++ extraction started: " + request.outputRoot());
@@ -177,6 +181,65 @@ final class ExtractorContextMenuProvider implements ContextMenuItemsProvider, Au
     }
 
     private boolean runExport(List<HttpRequestResponse> selectedItems, boolean includeSubtree, ExportRequest request) {
+        return startExport(
+                request,
+                progressListener -> exportMenuSelection(
+                        selectedItems,
+                        includeSubtree,
+                        request.outputRoot(),
+                        request.options(),
+                        progressListener
+                )
+        );
+    }
+
+    private boolean runResolvedExport(List<HttpRequestResponse> selectedItems, ExportRequest request) {
+        return startExport(
+                request,
+                progressListener -> exportSearchPlusSelection(
+                        selectedItems,
+                        request.outputRoot(),
+                        request.options(),
+                        progressListener
+                )
+        );
+    }
+
+    ExportSummary exportMenuSelection(
+            List<HttpRequestResponse> selectedItems,
+            boolean includeSubtree,
+            Path outputRoot,
+            ExportOptions options,
+            ExportProgressListener progressListener
+    ) throws IOException {
+        return exportService.export(
+                selectedItems,
+                includeSubtree,
+                outputRoot,
+                options,
+                progressListener
+        );
+    }
+
+    ExportSummary exportSearchPlusSelection(
+            List<HttpRequestResponse> selectedItems,
+            Path outputRoot,
+            ExportOptions options,
+            ExportProgressListener progressListener
+    ) throws IOException {
+        List<HttpRequestResponse> selectionSnapshot = selectedItems == null
+                ? List.of()
+                : List.copyOf(selectedItems);
+        return exportService.exportResolved(
+                selectionSnapshot,
+                selectionSnapshot.size(),
+                outputRoot,
+                options,
+                progressListener
+        );
+    }
+
+    private boolean startExport(ExportRequest request, ExportOperation exportOperation) {
         if (closed) {
             return false;
         }
@@ -192,13 +255,7 @@ final class ExtractorContextMenuProvider implements ContextMenuItemsProvider, Au
                     throw new CancellationException("extractor was closed before export started");
                 }
                 try {
-                    return exportService.export(
-                            selectedItems,
-                            includeSubtree,
-                            request.outputRoot(),
-                            request.options(),
-                            progressDialog
-                    );
+                    return exportOperation.run(progressDialog);
                 } finally {
                     activeExport.finishBackground();
                 }
@@ -348,5 +405,10 @@ final class ExtractorContextMenuProvider implements ContextMenuItemsProvider, Au
     }
 
     private record ExportRequest(Path outputRoot, ExportOptions options) {
+    }
+
+    @FunctionalInterface
+    private interface ExportOperation {
+        ExportSummary run(ExportProgressListener progressListener) throws IOException;
     }
 }

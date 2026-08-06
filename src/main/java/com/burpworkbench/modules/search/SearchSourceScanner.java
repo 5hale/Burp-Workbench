@@ -7,10 +7,8 @@ import burp.api.montoya.http.message.HttpRequestResponse;
 import burp.api.montoya.proxy.ProxyHttpRequestResponse;
 
 import java.time.ZonedDateTime;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
-import java.util.Set;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -304,7 +302,6 @@ final class SearchSourceScanner {
                     || visitItems(
                     items,
                     mapper,
-                    new HashSet<>(),
                     candidateState,
                     preparedSearch,
                     cancellation,
@@ -326,7 +323,6 @@ final class SearchSourceScanner {
             BooleanSupplier cancellation,
             Predicate<HttpExchange> visitor
     ) {
-        Set<ExchangeKey> seen = new HashSet<>();
         try {
             for (int partition = 0; partition < PARTITION_COUNT; partition++) {
                 activePhase = source + " partition " + (partition + 1) + "/" + PARTITION_COUNT;
@@ -335,7 +331,6 @@ final class SearchSourceScanner {
                         partition,
                         supplier,
                         mapper,
-                        seen,
                         candidateState,
                         preparedSearch,
                         cancellation,
@@ -372,7 +367,6 @@ final class SearchSourceScanner {
             int partition,
             IntFunction<List<T>> supplier,
             Function<T, HttpExchange> mapper,
-            Set<ExchangeKey> seen,
             CandidateState candidateState,
             SearchEngine.PreparedSearch preparedSearch,
             BooleanSupplier cancellation,
@@ -384,7 +378,6 @@ final class SearchSourceScanner {
                 || visitItems(
                 items,
                 mapper,
-                seen,
                 candidateState,
                 preparedSearch,
                 cancellation,
@@ -395,7 +388,6 @@ final class SearchSourceScanner {
     private <T> boolean visitItems(
             List<T> items,
             Function<T, HttpExchange> mapper,
-            Set<ExchangeKey> seen,
             CandidateState candidateState,
             SearchEngine.PreparedSearch preparedSearch,
             BooleanSupplier cancellation,
@@ -413,10 +405,6 @@ final class SearchSourceScanner {
                 }
                 if (candidateState == CandidateState.RAW
                         && !matchesContextScope(exchange.url())) {
-                    continue;
-                }
-                ExchangeKey key = new ExchangeKey(exchange.method(), exchange.url());
-                if (!seen.add(key)) {
                     continue;
                 }
                 if (candidateState == CandidateState.RAW
@@ -520,8 +508,5 @@ final class SearchSourceScanner {
     private enum CandidateState {
         RAW,
         MATCHED_AND_SCOPED
-    }
-
-    private record ExchangeKey(String method, String url) {
     }
 }

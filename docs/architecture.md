@@ -51,7 +51,7 @@ Owns context-menu extraction, sequential response-body processing, duplicate det
 
 ### Search++
 
-Owns top menu/context menu entry, advanced search window, post-search filters, negative match filtering, and request/response preview. `SearchSourceScanner` owns the existing 32-way hash-partitioned source traversal, scope filtering, deduplication, and cancellation checks; `SearchEngine` owns prepared query matching and per-item regular-expression deadlines. `SearchExecutionCoordinator` grants one source-scan permit across all Search++ windows without queuing or auto-cancelling another window. Result extraction calls `ExtractionHandler` only.
+Owns top menu/context menu entry, advanced search window, post-search filters, negative match filtering, and request/response preview. `SearchSourceScanner` owns the existing 32-way hash-partitioned source traversal, scope filtering, source-transaction delivery, and cancellation checks; it preserves each matching transaction supplied by a source instead of choosing one representative for a method-and-URL pair. Search results copy message data to Burp-managed temporary files so retained response bodies do not remain as ordinary heap-backed copies. `SearchEngine` owns prepared query matching and per-item regular-expression deadlines. `SearchExecutionCoordinator` grants one source-scan permit across all Search++ windows without queuing or auto-cancelling another window. Result extraction calls `ExtractionHandler` only.
 
 ## Future Modules
 

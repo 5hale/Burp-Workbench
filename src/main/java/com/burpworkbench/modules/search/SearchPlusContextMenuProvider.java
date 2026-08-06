@@ -22,7 +22,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 final class SearchPlusContextMenuProvider implements ContextMenuItemsProvider, AutoCloseable {
     private final MontoyaApi api;
-    private final SelectionResolver selectionResolver;
     private final RepeaterCache repeaterCache;
     private final ExtractionHandler extractionHandler;
     private final SearchExecutionCoordinator executionCoordinator;
@@ -36,7 +35,6 @@ final class SearchPlusContextMenuProvider implements ContextMenuItemsProvider, A
             SearchExecutionCoordinator executionCoordinator
     ) {
         this.api = api;
-        this.selectionResolver = new SelectionResolver(api);
         this.repeaterCache = repeaterCache;
         this.extractionHandler = extractionHandler;
         this.executionCoordinator = executionCoordinator;
@@ -53,13 +51,23 @@ final class SearchPlusContextMenuProvider implements ContextMenuItemsProvider, A
         }
         List<HttpRequestResponse> selectedItems = selectedItems(event);
         boolean includeSubtree = event.isFrom(InvocationType.SITE_MAP_TREE);
-        List<HttpRequestResponse> contextItems = includeSubtree
-                ? List.of()
-                : selectionResolver.resolve(selectedItems, false);
-        List<SelectionScope> contextScopes = includeSubtree ? SelectionResolver.scopesFor(selectedItems) : List.of();
+        ContextSelection contextSelection = contextSelection(selectedItems, includeSubtree);
         JMenuItem searchItem = new JMenuItem("Search++");
-        searchItem.addActionListener(e -> openDialog(contextItems, contextScopes));
+        searchItem.addActionListener(e -> openDialog(contextSelection.items(), contextSelection.scopes()));
         return List.of(searchItem);
+    }
+
+    static ContextSelection contextSelection(
+            List<HttpRequestResponse> selectedItems,
+            boolean includeSubtree
+    ) {
+        List<HttpRequestResponse> snapshot = selectedItems == null
+                ? List.of()
+                : List.copyOf(selectedItems);
+        if (includeSubtree) {
+            return new ContextSelection(List.of(), SelectionResolver.scopesFor(snapshot));
+        }
+        return new ContextSelection(snapshot, List.of());
     }
 
     private void openDialog(
@@ -119,6 +127,12 @@ final class SearchPlusContextMenuProvider implements ContextMenuItemsProvider, A
 
     private boolean extract(List<HttpRequestResponse> requestResponses) {
         return extractionHandler != null && extractionHandler.extract(requestResponses);
+    }
+
+    record ContextSelection(
+            List<HttpRequestResponse> items,
+            List<SelectionScope> scopes
+    ) {
     }
 
     @Override

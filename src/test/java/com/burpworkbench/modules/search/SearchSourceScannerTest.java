@@ -5,6 +5,8 @@ import burp.api.montoya.core.ByteArray;
 import burp.api.montoya.http.message.HttpRequestResponse;
 import burp.api.montoya.http.message.requests.HttpRequest;
 import burp.api.montoya.http.message.responses.HttpResponse;
+import burp.api.montoya.organizer.Organizer;
+import burp.api.montoya.organizer.OrganizerItem;
 import burp.api.montoya.proxy.ProxyHistoryFilter;
 import burp.api.montoya.proxy.ProxyHttpRequestResponse;
 import burp.api.montoya.sitemap.SiteMap;
@@ -62,7 +64,7 @@ class SearchSourceScannerTest {
 
         assertEquals(SearchSourceScanner.PARTITION_COUNT, sourceCalls.get());
         assertEquals(nodes.size(), nativeMatches.get());
-        assertEquals(96, matchedUrls.size());
+        assertEquals(nodes.size(), matchedUrls.size());
         assertEquals(96, new HashSet<>(matchedUrls).size());
         assertTrue(largestBatch.get() < nodes.size());
         assertTrue(SearchSourceScanner.partitionFor(Long.MIN_VALUE) >= 0);
@@ -144,19 +146,124 @@ class SearchSourceScannerTest {
         assertEquals(SearchSourceScanner.PARTITION_COUNT, sourceCalls.get());
         assertEquals(items.size(), nativeMatches.get());
         assertEquals(items.size(), convertedItems.get());
-        assertEquals(96, matchedUrls.size());
+        assertEquals(items.size(), matchedUrls.size());
         assertEquals(96, new HashSet<>(matchedUrls).size());
         assertTrue(largestBatch.get() < items.size());
+    }
+
+    @Test
+    void historyIdModePreservesEveryMatchingTransactionAtTheSameMethodAndUrl() {
+        int transactionCount = 182;
+        String url = "https://example.com/proxy/repeated";
+        AtomicInteger sourceCalls = new AtomicInteger();
+        AtomicInteger nativeMatches = new AtomicInteger();
+        AtomicInteger convertedItems = new AtomicInteger();
+        AtomicInteger largestBatch = new AtomicInteger();
+        Map<ProxyHttpRequestResponse, Long> historyIds = new IdentityHashMap<>();
+        Map<ProxyHttpRequestResponse, HttpRequestResponse> convertedTransactions =
+                new IdentityHashMap<>();
+        List<ProxyHttpRequestResponse> items = proxyItemsWithHistoryIds(
+                -91,
+                transactionCount,
+                url,
+                nativeMatches,
+                historyIds
+        );
+        SearchSourceScanner scanner = scanner(
+                null,
+                proxyHistory(items, sourceCalls, largestBatch),
+                List.of(),
+                item -> {
+                    convertedItems.incrementAndGet();
+                    HttpRequestResponse converted =
+                            requestResponse(item.finalRequest().url(), new AtomicInteger());
+                    convertedTransactions.put(item, converted);
+                    return converted;
+                },
+                ProxyHistoryPartitioner.historyIdForTesting(historyIds::get)
+        );
+        SearchOptions options = proxyOptions("needle");
+        List<String> matchedUrls = new ArrayList<>();
+        Map<HttpRequestResponse, Integer> identityCounts = new IdentityHashMap<>();
+
+        SearchSourceScanner.ScanStatistics statistics = scanner.scan(
+                options,
+                new SearchEngine().prepare(options),
+                () -> false,
+                exchange -> {
+                    matchedUrls.add(exchange.url());
+                    identityCounts.merge(exchange.requestResponse(), 1, Integer::sum);
+                    return true;
+                }
+        );
+
+        assertEquals(SearchSourceScanner.PARTITION_COUNT, sourceCalls.get());
+        assertEquals(transactionCount, nativeMatches.get());
+        assertEquals(transactionCount, convertedItems.get());
+        assertEquals(transactionCount, statistics.scannedItems());
+        assertEquals(transactionCount, statistics.matchedItems());
+        assertEquals(transactionCount, matchedUrls.size());
+        assertEquals(Set.of(url), new HashSet<>(matchedUrls));
+        assertEquals(transactionCount, identityCounts.size());
+        assertTrue(identityCounts.values().stream().allMatch(count -> count == 1));
+        assertTrue(convertedTransactions.values().stream().allMatch(identityCounts::containsKey));
+        assertTrue(largestBatch.get() < transactionCount);
+    }
+
+    @Test
+    void legacyMetadataCollisionsPreserveEveryMatchingTransaction() {
+        String url = "https://example.com/proxy/legacy-collision";
+        AtomicInteger sourceCalls = new AtomicInteger();
+        AtomicInteger nativeMatches = new AtomicInteger();
+        AtomicInteger convertedItems = new AtomicInteger();
+        List<ProxyHttpRequestResponse> items = List.of(
+                proxyItem(1, url, nativeMatches),
+                proxyItem(2, url, nativeMatches),
+                proxyItem(3, url, nativeMatches)
+        );
+        ProxyHistoryPartitioner partitioner = ProxyHistoryPartitioner.legacyMetadata();
+        long collidingKey = partitioner.stableKey(items.get(0));
+        assertTrue(items.stream().allMatch(item -> partitioner.stableKey(item) == collidingKey));
+        SearchSourceScanner scanner = scanner(
+                null,
+                proxyHistory(items, sourceCalls, new AtomicInteger()),
+                List.of(),
+                item -> {
+                    convertedItems.incrementAndGet();
+                    return requestResponse(item.finalRequest().url(), new AtomicInteger());
+                },
+                partitioner
+        );
+        SearchOptions options = proxyOptions("needle");
+        List<String> matchedUrls = new ArrayList<>();
+
+        SearchSourceScanner.ScanStatistics statistics = scanner.scan(
+                options,
+                new SearchEngine().prepare(options),
+                () -> false,
+                exchange -> {
+                    matchedUrls.add(exchange.url());
+                    return true;
+                }
+        );
+
+        assertEquals(SearchSourceScanner.PARTITION_COUNT, sourceCalls.get());
+        assertEquals(items.size(), nativeMatches.get());
+        assertEquals(items.size(), convertedItems.get());
+        assertEquals(items.size(), statistics.scannedItems());
+        assertEquals(items.size(), statistics.matchedItems());
+        assertEquals(List.of(url, url, url), matchedUrls);
     }
 
     @Test
     void historyIdFailureIsolatesOnlyThatItemAndDoesNotChangeMode() {
         AtomicInteger sourceCalls = new AtomicInteger();
         AtomicInteger nativeMatches = new AtomicInteger();
+        String repeatedUrl = "https://example.com/proxy/same-endpoint";
         ProxyHttpRequestResponse malformed =
-                proxyItem(1, "https://example.com/proxy/bad", nativeMatches);
+                proxyItem(1, repeatedUrl, nativeMatches);
         ProxyHttpRequestResponse valid =
-                proxyItem(2, "https://example.com/proxy/good", nativeMatches);
+                proxyItem(2, repeatedUrl, nativeMatches);
         List<ProxyHttpRequestResponse> items = List.of(malformed, valid);
         ProxyHistoryPartitioner partitioner =
                 ProxyHistoryPartitioner.historyIdForTesting(item -> {
@@ -188,7 +295,7 @@ class SearchSourceScannerTest {
 
         assertEquals(SearchSourceScanner.PARTITION_COUNT, sourceCalls.get());
         assertEquals(SearchSourceScanner.PARTITION_COUNT, statistics.malformedItems());
-        assertEquals(List.of("https://example.com/proxy/good"), matchedUrls);
+        assertEquals(List.of(repeatedUrl), matchedUrls);
         assertEquals(ProxyHistoryPartitioner.Mode.HISTORY_ID, partitioner.mode());
     }
 
@@ -283,6 +390,60 @@ class SearchSourceScannerTest {
     }
 
     @Test
+    void targetAndProxyPreserveOneSiteMapRecordAndAllRepeatedProxyTransactions() {
+        int proxyTransactionCount = 182;
+        String url = "https://example.com/repeated";
+        AtomicInteger targetCalls = new AtomicInteger();
+        AtomicInteger proxyCalls = new AtomicInteger();
+        AtomicInteger nativeMatches = new AtomicInteger();
+        Map<ProxyHttpRequestResponse, Long> historyIds = new IdentityHashMap<>();
+        List<ProxyHttpRequestResponse> proxyItems = proxyItemsWithHistoryIds(
+                -91,
+                proxyTransactionCount,
+                url,
+                nativeMatches,
+                historyIds
+        );
+        SiteMap siteMap = siteMap(
+                List.of(node(url, requestResponse(url, nativeMatches))),
+                targetCalls,
+                new AtomicInteger()
+        );
+        SearchSourceScanner scanner = scanner(
+                siteMap,
+                proxyHistory(proxyItems, proxyCalls, new AtomicInteger()),
+                List.of(),
+                item -> requestResponse(item.finalRequest().url(), new AtomicInteger()),
+                ProxyHistoryPartitioner.historyIdForTesting(historyIds::get)
+        );
+        SearchOptions options = targetAndProxyOptions("needle");
+        List<HttpExchange> matches = new ArrayList<>();
+
+        SearchSourceScanner.ScanStatistics statistics = scanner.scan(
+                options,
+                new SearchEngine().prepare(options),
+                () -> false,
+                exchange -> {
+                    matches.add(exchange);
+                    return true;
+                }
+        );
+
+        assertEquals(SearchSourceScanner.PARTITION_COUNT, targetCalls.get());
+        assertEquals(SearchSourceScanner.PARTITION_COUNT, proxyCalls.get());
+        assertEquals(proxyTransactionCount + 1, nativeMatches.get());
+        assertEquals(proxyTransactionCount + 1, statistics.scannedItems());
+        assertEquals(proxyTransactionCount + 1, statistics.matchedItems());
+        assertEquals(proxyTransactionCount + 1, matches.size());
+        assertEquals(1, matches.stream().filter(item -> "Target".equals(item.source())).count());
+        assertEquals(
+                proxyTransactionCount,
+                matches.stream().filter(item -> "Proxy".equals(item.source())).count()
+        );
+        assertTrue(matches.stream().allMatch(item -> url.equals(item.url())));
+    }
+
+    @Test
     void contextScopeRestrictsBothTargetAndProxySources() {
         AtomicInteger nativeMatches = new AtomicInteger();
         String targetInside = "https://example.com/allowed/target";
@@ -338,7 +499,7 @@ class SearchSourceScannerTest {
     }
 
     @Test
-    void rawSourcePreservesFirstOccurrenceDeduplicationBeforeMatching() {
+    void rawContextSourceEvaluatesLaterTransactionsWithTheSameMethodAndUrl() {
         String url = "https://example.com/same";
         List<HttpExchange> context = List.of(
                 new HttpExchange("Context", requestResponse(url, 404), null),
@@ -364,7 +525,46 @@ class SearchSourceScannerTest {
                 }
         );
 
-        assertTrue(statuses.isEmpty());
+        assertEquals(List.of(200), statuses);
+    }
+
+    @Test
+    void organizerEvaluatesLaterTransactionsWithTheSameMethodAndUrl() {
+        String url = "https://example.com/organizer/same";
+        List<OrganizerItem> items = List.of(
+                organizerItem(url, 404),
+                organizerItem(url, 200)
+        );
+        Organizer organizer = proxy(Organizer.class, (method, args) ->
+                "items".equals(method.getName()) && (args == null || args.length == 0)
+                        ? items
+                        : defaultValue(method.getReturnType())
+        );
+        MontoyaApi api = proxy(MontoyaApi.class, (method, args) ->
+                "organizer".equals(method.getName())
+                        ? organizer
+                        : defaultValue(method.getReturnType())
+        );
+        SearchSourceScanner scanner = new SearchSourceScanner(
+                api,
+                List.of(),
+                List.of(),
+                null
+        );
+        SearchOptions options = organizerStatusOptions();
+        List<Integer> statuses = new ArrayList<>();
+
+        scanner.scan(
+                options,
+                new SearchEngine().prepare(options),
+                () -> false,
+                exchange -> {
+                    statuses.add(exchange.statusCode());
+                    return true;
+                }
+        );
+
+        assertEquals(List.of(200), statuses);
     }
 
     @Test
@@ -420,15 +620,16 @@ class SearchSourceScannerTest {
     @Test
     void regexTimeoutIsIncompleteButTheNextItemStillMatches() {
         String slowBody = "a".repeat(16_384) + "!";
+        String repeatedUrl = "https://example.com/same-timeout-endpoint";
         List<HttpExchange> context = List.of(
                 new HttpExchange(
                         "Context",
-                        regexRequestResponse("https://example.com/slow", slowBody),
+                        regexRequestResponse(repeatedUrl, slowBody),
                         null
                 ),
                 new HttpExchange(
                         "Context",
-                        regexRequestResponse("https://example.com/next", "needle"),
+                        regexRequestResponse(repeatedUrl, "needle"),
                         null
                 )
         );
@@ -455,7 +656,7 @@ class SearchSourceScannerTest {
         assertEquals(2, statistics.scannedItems());
         assertEquals(1, statistics.matchedItems());
         assertTrue(statistics.incomplete());
-        assertEquals(List.of("https://example.com/next"), matches);
+        assertEquals(List.of(repeatedUrl), matches);
     }
 
     private SearchSourceScanner scanner(SiteMap siteMap) {
@@ -548,6 +749,23 @@ class SearchSourceScannerTest {
         });
     }
 
+    private List<ProxyHttpRequestResponse> proxyItemsWithHistoryIds(
+            int firstId,
+            int count,
+            String url,
+            AtomicInteger nativeMatches,
+            Map<ProxyHttpRequestResponse, Long> historyIds
+    ) {
+        List<ProxyHttpRequestResponse> items = new ArrayList<>(count);
+        for (int offset = 0; offset < count; offset++) {
+            int historyId = firstId + offset;
+            ProxyHttpRequestResponse item = proxyItem(historyId, url, nativeMatches);
+            items.add(item);
+            historyIds.put(item, (long) historyId);
+        }
+        return items;
+    }
+
     private SiteMapNode node(String url, HttpRequestResponse requestResponse) {
         return proxy(SiteMapNode.class, (method, args) -> switch (method.getName()) {
             case "url" -> url;
@@ -581,6 +799,20 @@ class SearchSourceScannerTest {
                 nativeMatches.incrementAndGet();
                 yield true;
             }
+            default -> defaultValue(method.getReturnType());
+        });
+    }
+
+    private OrganizerItem organizerItem(String url, int statusCode) {
+        HttpRequest request = request(url);
+        HttpResponse response = proxy(HttpResponse.class, (method, args) -> switch (method.getName()) {
+            case "statusCode" -> (short) statusCode;
+            default -> defaultValue(method.getReturnType());
+        });
+        return proxy(OrganizerItem.class, (method, args) -> switch (method.getName()) {
+            case "request" -> request;
+            case "response" -> response;
+            case "hasResponse" -> true;
             default -> defaultValue(method.getReturnType());
         });
     }
@@ -712,6 +944,28 @@ class SearchSourceScannerTest {
                 false,
                 false,
                 false,
+                false,
+                Set.of("2xx"),
+                Set.of(),
+                Set.of()
+        );
+    }
+
+    private SearchOptions organizerStatusOptions() {
+        return new SearchOptions(
+                "",
+                SearchMode.TEXT,
+                false,
+                false,
+                false,
+                true,
+                true,
+                true,
+                true,
+                false,
+                false,
+                false,
+                true,
                 false,
                 Set.of("2xx"),
                 Set.of(),
