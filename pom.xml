@@ -6,19 +6,18 @@
 
     <groupId>com.burpworkbench</groupId>
     <artifactId>burp-workbench-extension</artifactId>
-    <version>0.4.6</version>
+    <version>0.4.7</version>
     <packaging>jar</packaging>
 
     <name>Burp Workbench</name>
-    <description>Modular Burp Suite workbench extension with Extractor and Search++.</description>
+    <description>Modular Burp Suite workbench extension with Extractor, Search++, and Replace++.</description>
 
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <maven.compiler.release>17</maven.compiler.release>
-        <montoya.version>2025.8</montoya.version>
+        <montoya.version>2025.12</montoya.version>
         <workbench.build.directory>${project.basedir}/target</workbench.build.directory>
         <rhino.version>1.8.0</rhino.version>
-        <junit.version>5.13.4</junit.version>
     </properties>
 
     <dependencies>
@@ -38,12 +37,6 @@
             <artifactId>rhino</artifactId>
             <version>${rhino.version}</version>
         </dependency>
-        <dependency>
-            <groupId>org.junit.jupiter</groupId>
-            <artifactId>junit-jupiter</artifactId>
-            <version>${junit.version}</version>
-            <scope>test</scope>
-        </dependency>
     </dependencies>
 
     <build>
@@ -54,14 +47,6 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
                 <version>3.14.0</version>
-            </plugin>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-surefire-plugin</artifactId>
-                <version>3.5.3</version>
-                <configuration>
-                    <useModulePath>false</useModulePath>
-                </configuration>
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>

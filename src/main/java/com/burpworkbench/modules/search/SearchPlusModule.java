@@ -10,7 +10,7 @@ import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class SearchPlusModule implements WorkbenchModule {
-    static final String MONTOYA_COMPILE_BASELINE = "2025.8";
+    static final String MONTOYA_COMPILE_BASELINE = "2025.12";
 
     private final ExtractionHandler extractionHandler;
 
