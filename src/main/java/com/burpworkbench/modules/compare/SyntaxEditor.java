@@ -7,7 +7,7 @@ import java.awt.*;
 import java.awt.geom.Rectangle2D;
 import java.util.List;
 
-/** Read-only viewer. Colors only the visible lines; no StyledDocument or per-byte Swing tags. */
+/** Colors only the visible lines; no StyledDocument or per-byte Swing tags. */
 final class SyntaxEditor extends JTextArea {
     private Comparison.Side presentation;
     final JComponent gutter=new Gutter();
@@ -33,6 +33,14 @@ final class SyntaxEditor extends JTextArea {
         catch(BadLocationException impossible){throw new IllegalStateException(impossible);}
         setCaretPosition(0);gutter.revalidate();gutter.repaint();repaint();
     }
+    void decorate(Comparison.Side value){
+        if(!getText().equals(value.text())){show(value);return;}
+        presentation=value;getHighlighter().removeAllHighlights();
+        if(!value.text().isEmpty()&&!value.ranges().isEmpty())try{getHighlighter().addHighlight(0,value.text().length(),new DifferencePainter());}
+        catch(BadLocationException impossible){throw new IllegalStateException(impossible);}
+        gutter.revalidate();gutter.repaint();repaint();
+    }
+    void invalidatePresentation(){presentation=null;getHighlighter().removeAllHighlights();gutter.repaint();repaint();}
     void clear(){show(Comparison.Side.plain(""));}
     Comparison.Side presentation(){return presentation;}
     private float drawColors(Graphics2D g,float x,float y,int start,int end,TabExpander tabs)throws BadLocationException{

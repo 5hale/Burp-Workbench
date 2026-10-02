@@ -6,7 +6,7 @@
 
     <groupId>com.burpworkbench</groupId>
     <artifactId>burp-workbench-extension</artifactId>
-    <version>0.5.0</version>
+    <version>0.5.1</version>
     <packaging>jar</packaging>
 
     <name>Burp Workbench</name>
@@ -20,7 +20,6 @@
         <rhino.version>1.8.0</rhino.version>
         <jackson.version>2.18.11</jackson.version>
         <jsoup.version>1.23.2</jsoup.version>
-        <libphonenumber.version>9.0.40</libphonenumber.version>
     </properties>
 
     <dependencies>
@@ -33,11 +32,6 @@
             <groupId>org.jsoup</groupId>
             <artifactId>jsoup</artifactId>
             <version>${jsoup.version}</version>
-        </dependency>
-        <dependency>
-            <groupId>com.googlecode.libphonenumber</groupId>
-            <artifactId>libphonenumber</artifactId>
-            <version>${libphonenumber.version}</version>
         </dependency>
         <dependency>
             <groupId>net.portswigger.burp.extensions</groupId>

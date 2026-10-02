@@ -1,6 +1,6 @@
-Burp Workbench 0.5.0
+Burp Workbench 0.5.1
 Montoya API: provided by Burp, not bundled.
-Jackson 2.18.11 and libphonenumber 9.0.40: Apache-2.0; licenses/Apache-2.0.txt.
+Jackson 2.18.11: Apache-2.0; licenses/Apache-2.0.txt.
 jsoup 1.23.2: MIT; META-INF/jsoup/LICENSE from the dependency JAR.
 Brotli Java decoder 0.1.2: MIT; licenses/Brotli-MIT.txt.
 Rhino 1.8.0: Mozilla Public License 2.0; licenses/MPL-2.0.txt.
@@ -9,3 +9,7 @@ Rhino source: https://github.com/mozilla/rhino/releases/tag/Rhino1_8_0_Release
 js-beautify: product-vendored version; vendor/js-beautify/LICENSE (MIT).
 
 Filtering uses no external service.
+Adapted optional rule patterns: licenses/Extractor-rules-NOTICE.txt.
+Gitleaks and Presidio: MIT; licenses/Gitleaks-MIT.txt, licenses/Presidio-MIT.txt.
+Sensitive Discoverer: Apache-2.0; licenses/SensitiveDiscoverer-Apache-2.0.txt.
+libphonenumber informed earlier research but is not executed or bundled.

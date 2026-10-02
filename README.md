@@ -2,7 +2,7 @@
 
 Burp Workbench is a single-jar Burp Suite extension that groups workflow modules around a shared core.
 
-Current version: `0.5.0`
+Current version: `0.5.1`
 
 ## Modules
 
@@ -14,14 +14,14 @@ Current version: `0.5.0`
 
 ## Supported Burp versions
 
-Burp Workbench `0.5.0` supports Burp Suite versions from `2025.12`
+Burp Workbench `0.5.1` supports Burp Suite versions from `2025.12`
 through `2026.7.1`, inclusive.
 
 | Burp Suite version | Proxy compatibility mode | Support |
 |---|---|---|
 | `2025.12` through `2026.7.1` | `HISTORY_ID` | Supported target range |
 | Earlier than `2025.12` | — | Not supported |
-| Later than `2026.7.1` | Runtime capability detection | Outside the supported range of `0.5.0` |
+| Later than `2026.7.1` | Runtime capability detection | Outside the supported range of `0.5.1` |
 
 Every supported version uses the same distribution jar. Compatibility mode
 selection is automatic and does not require a user setting. The extension is
@@ -50,14 +50,15 @@ The memory reduction has explicit trade-offs: Target/Proxy keep the existing 32-
 
 ## Extractor
 
-The top-level `Extractor` tab creates and orders filter rules; extraction still starts from the HTTP context menu or Search++ results. In the output-folder chooser, `Filter` sits beside `Beautify` and is off by default.
+The top-level `Extractor` tab manages filter rules; export still starts from HTTP context menus or Search++ results. The original folder chooser keeps `Beautify` and an optional `Filter` checkbox, off by default.
 
-- Filter off preserves normal extraction. Filter on applies the current rules before writing bodies, metadata and filenames; it never falls back to unfiltered content on a filtering failure.
-- Automatic detection is deliberately limited to Korean mobile numbers and email addresses. Mobile detection uses formatting/field context and number validation; arbitrary eleven-digit numbers are not sufficient. Other information requires explicit rules. This is not complete anonymization.
-- Add exact strings and free tags such as `§COMPANY_1§`. `LITERAL` matches the exact string; `HOST` matches host boundaries, case-insensitively. Scope is `ALL`, `BODY`, or `METADATA`; earlier custom rules take priority. Automatic tags such as `§PHONE_1§` are stable within an export and avoid existing tags.
-- Rules, order, automatic-detection choices and unfinished drafts are saved in the Burp project, including original strings entered in rules. Protect that project accordingly. Invalid stored data is not silently reset; Filter on is blocked if its rules cannot be loaded or validated.
-- `filter_attributes.json` describes tags, types, evidence and occurrence counts without original sensitive values. Tagged JSON scalars may become strings. Content-Type guides JSON/HTML/XML/CSV/form/text parsing; Filter has an 8 MiB input/decoded-body limit and rejects unsupported or invalid data instead of lossy conversion.
-- `Test file…` compares a local original and filtered result without sending requests. Review filtered outputs before sharing; unconfigured categories can remain.
+- New projects start with an empty rule list. `Rulesets…` copies selected optional templates into your own list; templates are editable and can be copied. Categories/search are for organization, not automatic personal-data classification. The current catalog is an initial regex-based collection, not the complete upstream detection engines.
+- Basic fields are Name, Category, Regex, Pattern, Tag and a free Description. Advanced options include literal/domain match, Body/Headers/All scope, source text or parsed values, capture group, tag numbering, Content-Type/field-name/excluded-value regexes. Group 0 replaces the whole match; a higher group changes only the captured value.
+- Ctrl/Shift selection supports batch Copy/Remove/Up/Down. Table columns follow the divider; Hide details preserves selection, filters and edits. Rules, order and drafts are project-persisted, including literals entered by the user: protect the project accordingly.
+- Filter OFF preserves ordinary export. Filter ON applies only enabled user rules before saving bodies, metadata and filenames. A filter failure does not fall back to saving unfiltered content. Review outputs before sharing: regex templates can produce false positives or miss information, and this is not complete anonymization.
+- Tags such as `§EMAIL_1§` are consistent within an export. Tagged JSON scalars may become strings. `filter_attributes.json` records tags, categories, original types, rule IDs and counts, without sensitive source values. JSON/HTML/XML/CSV/form/text/HTTP parsing uses an 8 MiB input/decoded limit.
+- `Test rules…` loads local files or accepts pasted input, without sending requests. Input/Filtered wrap by default; input supports Ctrl+Z/Redo. Highlighted replacement tags can be followed with ‹/›, F3/Shift+F3 or match-row selection. Start/End refer to the matched value/source, not absolute output coordinates. Ambiguous tags already present in the input are not navigated.
+- Existing 0.5.0 direct rules and saved mobile/email choices are read into visible rules; the old project state is retained. Mobile/email choices become editable regex templates, so review their coverage rather than assuming the old library's validation. Demo settings are never imported. Invalid/external changes do not silently overwrite saved data.
 
 ## Workbench context menus
 
@@ -65,58 +66,35 @@ Owned text inputs offer Cut/Copy/Paste/Select All and applicable Send to Replace
 
 ## replace ++
 
-Open `Proxy > replace ++`, immediately to the right of the built-in `Match and replace` tab. Its Replace and Forward pages have separate Enabled settings. Rules are edited inline with Add, Copy, Remove, Up, and Down. Replace starts with equal list/detail and preview widths and compact Match/Replace fields; splitters remain resizable and detail sections can be collapsed.
+Open `Proxy > replace ++` next to built-in Match and replace. Replace/Forward management buttons are icons with tooltips. Lists support Ctrl/Shift batch Copy/Remove/Up/Down; divider-aware columns and Hide details preserve the working layout.
 
-- Rule types: request header, request body, response header, response body, request parameter name, request parameter value, and request first line. Parameter rules cover URL query and UTF-8 form-urlencoded fields, not JSON properties, multipart, or cookies.
-- URL/origin matches an HTTP(S) origin exactly, including its effective port. Path matches the raw path without query/fragment: `*` does not cross `/`, `**` includes subpaths, and `/api/**` also matches `/api`. A blank field does not restrict that condition; blank URL and Path, or blank URL with Path `**`, match every origin/path.
-- Enabled rules run in list order on Proxy messages immediately before forwarding. New rules start off. Editing scope or replacement behavior switches the rule off until explicitly re-enabled; editing only the comment does not. Copy retains the source rule's enabled state. These rules are separate from Burp's built-in Match and replace rules.
-- `Hotkeys` assigns, changes, or clears the extension shortcut; the default is `Ctrl+Shift+Q`. With a selected HTTP message, the shortcut opens the tab and creates a new off rule populated with origin and Path. Without a usable message, it only opens the tab. Shortcut changes last for the current extension load and are not OS-wide hotkeys.
-- The context menu `Extensions > Burp Workbench > Send to replace ++` also opens Replace++ with a new off rule. It takes origin/Path from the current editor's request, or the first selected request in a table. The focused Request or Response is copied into Test Preview in full (up to 1 MiB), regardless of text selection; no traffic is sent. The item is disabled when no usable request scope is available.
-- Test uses Burp's native request/response editors, font settings, and syntax highlighting. It previews only the selected rule's Type/Match/Replace, independently of its On state and URL/Path scope; it does not send traffic. Computation runs off the UI thread and superseded results are discarded.
-- Rules, ordering, individual On states, and the overall Enabled state are saved automatically in the current project's extension data. Test samples and shortcut assignments are not saved. Persistence across Burp restarts requires a saved project; temporary projects may not retain it. Invalid or externally changed stored data is not silently overwritten.
-
-Text-body replacement uses the declared charset, or UTF-8 when none is declared. It supports gzip/deflate bodies; a changed Brotli body is emitted uncompressed. Unsupported or invalid body encodings are skipped rather than decoded lossily. Proxy messages/output are bounded to 8 MiB, decoded text to 16 MiB, and headers to 256 KiB. Processing also has per-rule and per-message time budgets. Invalid or over-budget rules are skipped without committing that rule's partial edit; successful earlier edits can remain. These are safety limits, not an unlimited binary-replacement facility.
-
-On first use, when no rules have been saved, six header-removal presets are provided. Each uses `Request header`, Regex, an empty replacement, and starts **OFF**, with no URL/Path restriction. Narrow its scope and enable only the rules you need.
-
-| Preset | Match |
-|---|---|
-| Remove If-Modified-Since | `(?im)^If-Modified-Since.*$` |
-| Remove If-None-Match | `(?im)^If-None-Match.*$` |
-| Remove Sec-CH headers | `(?im)(s|S)ec-(c|C)h.*` |
-| Remove Sec-Fetch headers | `(?im)(s|S)ec-(f|F)etch.*` |
-| Remove Cache-Control (optional) | `(?im)^Cache-Control:.*$` |
-| Remove Pragma (optional) | `(?im)^Pragma:.*$` |
-
-The presets' `(?im)` flags ignore case and anchor `^`/`$` to individual header lines. Existing user rules retain their regex behavior. Removing cache directives or browser metadata can change caching and server checks. Cookie, Authorization, Origin, and Referer are not removed by these presets. Existing saved rules, including an intentionally empty list, are restored without appending defaults or recreating deleted rules.
+- Valid sessions are always active: the global Enabled switches have been removed. Each rule's On controls actual application. New rules start OFF. Valid edits retain the existing On/OFF state; invalid drafts remain editable and become OFF when leaving the rule/page. Originally OFF rules do not turn ON automatically. Text inputs support Ctrl+Z/Redo.
+- Replacement matching ignores case by default. Match case opts into case-sensitive literal/regex matching. URL/origin and Path conditions are independent of that option.
+- Targets include request/response first lines, headers and bodies, plus request query/form parameters. Request headers exclude the request line; Response first line can change the HTTP version/status/reason without editing headers or body. Whole binary payloads, arbitrary structured parameters, multipart and trailer rewriting are not provided.
+- Origin scope is exact `http(s)://host[:port]`; Path uses raw path globs (`*` within a segment, `**` across segments), without query. Empty conditions are unrestricted.
+- Test Preview uses direction-sensitive native Burp editors without sending traffic. It compares the sample with the result; the two preview widths start equal and the rule fields start compact. Scope capture/default Ctrl+Shift+Q adds an OFF rule and snapshots the focused whole request/response.
+- Rules, order, individual On and Match case persist in project extension data. Existing schema1 rules load with case-insensitive matching; schema2 stores the explicit flag and retains a previous backup. Samples/hotkey changes are not part of rule storage. Corrupt or externally changed state is not silently reset.
+- Replace is applied in list order immediately before Proxy forwarding. Invalid or over-budget edits do not commit partial changes. Limits: 8 MiB message/output, 16 MiB decoded text, 256 KiB headers, 1,000 applicable rules, 250 ms per rule and one second aggregate engine work; scope preflight has a separate 250 ms budget. Query/form rules use UTF-8. Body rules preserve declared charset and gzip/deflate; modified Brotli bodies are emitted without content coding.
 
 ### Forward
 
-The Forward page routes Proxy requests to another server after Workbench replacement. It does not redirect the browser or send an additional request. Source URLs can remain visible in the address bar and Proxy history even though the response comes from the destination.
+Source URL | Source Path and Destination URL | Destination Path are edited as two rows. Forward runs after Replace, always last; the last valid matching rule in list order wins. It changes HttpService/Host and optionally Path while preserving the raw query, not the browser address bar and not an extra request.
 
-- Inputs are `Source URL | Source Path` and `Destination URL | Destination Path`. Source conditions use the same origin/path matching as Replace. Destination URL is an HTTP(S) origin, optionally with a port; the path belongs in Destination Path.
-- With both paths blank, the actual matching request path is kept. A blank Destination Path keeps that path; a supplied Destination Path replaces it. Blank Source Path matches all paths. Raw query strings are preserved.
-- Enabled rules are evaluated in list order against the original source URL; the last valid match wins. Forward always runs after Workbench Replace, changing the connection service and Host header. This ordering does not control other Burp extensions.
-- Forward has separate project-persisted rules and Enable state. First use starts empty and OFF; new rules start OFF. Test only computes the destination URL and does not send traffic.
+Source URL is an exact origin. With an empty Destination Path, the actual request path is retained; with an empty Source Path, its path condition is unrestricted. Empty paths on both sides retain the matched request path. New Forward rules are OFF in an initially empty list. Test computes the destination only.
 
-### Upgrade to 0.5.0
+### 0.5.1 upgrade
 
-Existing 0.4.9 Replace rules, ordering and enable states are retained. Independent demo rules are not migrated. New Forward settings start empty/OFF; existing product Decoder shortcut preferences remain valid. Unload old extensions or independent demos before loading the new jar to avoid duplicate registrations.
+Existing product Replace/Forward rules and their individual On states are kept; the old global Enabled setting no longer disables a valid session. Demo rules are not imported. Extractor reads legacy product choices as described above. Unload the old extension/independent demos before loading the new JAR to avoid duplicate handlers.
 
 ## compare ++
 
-Open `Proxy > compare ++`, immediately to the right of `replace ++`. Paste or load text, or send a focused HTTP message from its context menu or the configurable `Ctrl+Shift+W` shortcut. Request/Response is taken from the focused editor; a selected byte range is imported as Text. History/Site map table hotkey capture is not supported. The first two imports become A/B automatically; further imports do not replace the current pair. Selecting either side updates the comparison in the same tab.
+Open `Proxy > compare ++` next to Replace++. Capture from the focused HTTP editor/context menu or Ctrl+Shift+W; selected bytes are imported as Text. Paste/Load and `+` empty items also work. The first two imports are assigned A/B. With `+`, an empty side is used first; otherwise the last active side (initially A) receives the new item.
 
-- Words, Unicode Characters, and exact Bytes comparison; independent Pretty/Raw/Hex tabs with Auto/UTF-8/MS949/ISO-8859-1 decoding. Raw/Hex preserve original bytes; Hex uses a fixed-width font for aligned byte and ASCII columns.
-- Pretty formats disposable JS/JSON copies. Mixed Pretty/Raw or Pretty/Hex includes formatting differences; both Pretty can hide whitespace-only differences. Positions refer to each side's representation (formatted UTF-8 for Pretty). HTTP headers still describe the original body. Unsupported/lossy content falls back to Raw on that side.
-- Pretty/Raw use the themed text-field default font (no added Bold), syntax colors and Modified/Deleted/Added backgrounds. This is the Workbench renderer, not Burp's native Pretty/Inspector. Captured bytes and Repeater request snapshots are never rewritten.
-- Incoming captures mark the Compare tab orange until selected, without blinking or switching away from the current screen. Compare/Replace shortcuts also work in owned Workbench windows; hotkey settings fields are excluded.
-- Previous/next difference buttons and `Alt+Up`/`Alt+Down` move both panes. `Find` is independent literal-text search in the last focused pane: Enter/Shift+Enter or its own arrows move text matches. An empty Find does nothing and disables its arrows. `Ctrl+F` focuses Find.
-- `Differences only` hides equal segments without changing the captured bytes. Sync scroll, Wrap, resizable panes, item sorting, Remove/Clear, and cancellation are available.
-- `Ctrl+R` in either pane adds that item's original request to Repeater without sending it. Response/selection imports retain the original request and service when available. Paste/Load text has no original service and is not sent to an inferred destination.
-- The collection and shortcut assignments last for the current extension load; they are not project-persisted. Captured items are copied, capped at 1 MiB each and 200 items / 32 MiB total, including retained original requests. Requests over 1 MiB are not retained for Repeater.
-
-Comparison runs off the UI thread with exact small-edit and linear-space large-edit paths. A four-second diff calculation budget and cancellation checks prevent unbounded work; decoding and rendering are outside that calculation budget. If comparison cannot complete, the original data remains visible with a clear failure notice instead of an empty result or a false "no differences" result. This module does not register traffic handlers or change Replace++ rules.
+- A/B independently select Pretty/Raw/Hex, encoding, and text. A alone or B alone supports view/settings/find. Raw whole view is editable with Ctrl+Z/Redo; Pretty/Hex/Differences only and lossy decoding are read-only. Each side keeps its own draft, even for the same item; the original bytes remain unchanged. ↶ restores that side's original.
+- Diff refresh is debounced by 250 ms and preserves caret/undo. Words/Unicode Characters/Bytes comparison, exact changes, Sync, Wrap, Differences only and literal Find are retained. Empty Find never navigates differences; Alt+Up/Down moves differences, Enter/Shift+Enter moves Find matches.
+- Items supports Ctrl/Shift batch Copy/Remove, adjustable columns and the existing hide/show toggle. Copy uses the working content; captured original requests remain the source for the explicit Repeater action (Ctrl+R). Capturing or comparing never performs a network Send.
+- Session limits are 1 MiB/item, 200 items and 32 MiB total including source requests and drafts. Compare data is not project-persisted and is released on unload.
+- Incoming captures mark the tab orange until selected without pulsing or stealing focus. Native Pretty/Raw/Hex controls in Replace previews remain Burp-owned.
 
 ## decoder ++
 
@@ -134,10 +112,10 @@ Open from an HTTP editor context menu: `Extensions > Burp Workbench > decode ++`
 Build the project and load this shaded jar in Burp Suite:
 
 ```text
-target\burp-workbench-extension-0.5.0.jar
+target\burp-workbench-extension-0.5.1.jar
 ```
 
-This single shaded jar is the distribution for every supported Burp version. Do not install `target\original-burp-workbench-extension-0.5.0.jar`; that file is Maven's unshaded backup and does not include bundled runtime dependencies such as Brotli/Rhino.
+This single shaded jar is the distribution for every supported Burp version. Do not install `target\original-burp-workbench-extension-0.5.1.jar`; that file is Maven's unshaded backup and does not include bundled runtime dependencies such as Brotli/Rhino.
 
 ## Build
 
@@ -155,11 +133,11 @@ mvn package
 Expected build outputs:
 
 ```text
-target\burp-workbench-extension-0.5.0.jar
-target\original-burp-workbench-extension-0.5.0.jar
+target\burp-workbench-extension-0.5.1.jar
+target\original-burp-workbench-extension-0.5.1.jar
 ```
 
-Only `target\burp-workbench-extension-0.5.0.jar` is a loadable distribution artifact.
+Only `target\burp-workbench-extension-0.5.1.jar` is a loadable distribution artifact.
 
 ## Architecture
 

@@ -9,7 +9,7 @@ final class ForwardSession {
     static final String BACKUP="burpworkbench.forward.v1.backup";
     record State(List<ForwardRule> rules, boolean enabled) {
         State { rules=List.copyOf(rules); }
-        static State empty(){return new State(List.of(),false);}
+        static State empty(){return new State(List.of(),true);}
     }
     private final RuleSession storage;
     private volatile State state;
@@ -17,13 +17,13 @@ final class ForwardSession {
     ForwardSession(PersistedObject project) {
         storage=new RuleSession(new RuleStore(project,KEY,BACKUP,new RuleStore.State(List.of(),false)));
         try { state=new State(storage.snapshot().rules().stream().map(ForwardRule::from).toList(),storage.snapshot().enabled()); }
-        catch(IllegalArgumentException failure){state=State.empty();invalid=true;}
+        catch(IllegalArgumentException failure){state=new State(List.of(),false);invalid=true;}
     }
     State snapshot(){return state;}
     void rulesChanged(List<ForwardRule> rules){
         state=new State(rules,state.enabled());storage.rulesChanged(rules.stream().map(ForwardRule::stored).toList());
     }
-    void enabledChanged(boolean enabled){state=new State(state.rules(),enabled);storage.enabledChanged(enabled);}
+    void enabledChanged(boolean enabled) { /* Global toggle removed; per-rule On is retained. */ }
     void flush(){if(!invalid)storage.flush();}
     String status(){return invalid?"Load failed · stored data preserved":storage.status();}
 }

@@ -23,11 +23,10 @@ final class ReplacePanel extends JPanel {
     private final JComboBox<String> target = new JComboBox<>(RuleTypes.labels());
     private final JTextField comment = new JTextField(), url = new JTextField(), path = new JTextField();
     private final JCheckBox regex = new JCheckBox("Regex match");
+    private final JCheckBox caseSensitive = new JCheckBox("Match case");
     private final JTextArea match = text(true), replacement = text(true);
     private final PreviewEditor sample, result;
     private final Consumer<List<RuleDraft>> onRulesChanged;
-    private final Consumer<Boolean> onEnabledChanged;
-    private final JCheckBox enabled = new JCheckBox("Enabled");
     private final javax.swing.Timer samplePoll;
     private final com.burpworkbench.platform.LatestWork previewWork = new com.burpworkbench.platform.LatestWork("replace-preview");
     private boolean previewPending;
@@ -51,13 +50,12 @@ final class ReplacePanel extends JPanel {
         this.rules = new RuleList(initial);
         this.model = new RuleTable(); this.table = new JTable(model);
         this.sample = sample; this.result = result;
-        this.onRulesChanged = onRulesChanged; this.onEnabledChanged = onEnabledChanged;
-        this.enabled.setSelected(enabled);
+        this.onRulesChanged = onRulesChanged;
         samplePoll = new javax.swing.Timer(250, event -> pollSampleChanges());
         samplePoll.setRepeats(true);
         addHierarchyListener(event -> {
             if ((event.getChangeFlags() & HierarchyEvent.SHOWING_CHANGED) != 0) {
-                if (!closed && isShowing()) samplePoll.start(); else samplePoll.stop();
+                if (!closed && isShowing()) samplePoll.start(); else { samplePoll.stop();settleEdits(); }
             }
         });
         setBorder(new EmptyBorder(8, 10, 6, 10));
@@ -91,15 +89,13 @@ final class ReplacePanel extends JPanel {
         sample.component().setName("preview.sample"); result.component().setName("preview.result");
         previewStatus.setName("preview.status");
         previewStatus.setVisible(false);
-        enabled.setName("traffic.enabled");
+        caseSensitive.setName("rule.case");
+        caseSensitive.setToolTipText("Off: ignore case in the Match pattern. URL/path scope is unchanged.");
     }
 
     private JComponent toolbar(Runnable openHotkeys) {
         JPanel bar = new JPanel(new BorderLayout(8, 0));
         JPanel actions = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 0));
-        enabled.addActionListener(event -> { if (!closed) onEnabledChanged.accept(enabled.isSelected()); });
-        enabled.setToolTipText("Apply enabled rules to Proxy traffic");
-        actions.add(enabled);
         for (JButton action : List.of(
                 button("Add", "rule.add", this::add),
                 button("Copy", "rule.copy", this::copy),
@@ -124,7 +120,7 @@ final class ReplacePanel extends JPanel {
             center.remove(listScroll);
             split.setLeftComponent(listScroll);
             center.add(split, BorderLayout.CENTER);
-            table.setAutoResizeMode(JTable.AUTO_RESIZE_OFF);
+            table.setAutoResizeMode(JTable.AUTO_RESIZE_ALL_COLUMNS);
             if (columnWidths != null) {
                 for (int i = 0; i < columnWidths.length; i++) {
                     table.getColumnModel().getColumn(i).setPreferredWidth(columnWidths[i]);
@@ -177,7 +173,8 @@ final class ReplacePanel extends JPanel {
         metadata.setName("rule.metadata");
         metadata.setBorder(new EmptyBorder(3, 8, 9, 8));
         metadata.add(fields, BorderLayout.CENTER);
-        metadata.add(regex, BorderLayout.SOUTH);
+        JPanel matching = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
+        matching.add(regex); matching.add(caseSensitive); metadata.add(matching, BorderLayout.SOUTH);
         metadata.setAlignmentX(Component.LEFT_ALIGNMENT);
         sections.add(metadata);
 
@@ -225,14 +222,15 @@ final class ReplacePanel extends JPanel {
     }
 
     private void configureTable() {
-        table.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+        table.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
         table.setRowHeight(30);
         table.setShowGrid(false);
         table.setFillsViewportHeight(true);
-        table.setAutoResizeMode(JTable.AUTO_RESIZE_OFF);
+        table.setAutoResizeMode(JTable.AUTO_RESIZE_ALL_COLUMNS);
         table.getTableHeader().setReorderingAllowed(false);
         int[] widths = {48, 175, 140, 220, 220, 75};
         for (int i = 0; i < widths.length; i++) table.getColumnModel().getColumn(i).setPreferredWidth(widths[i]);
+        table.getColumnModel().getColumn(0).setMaxWidth(48);
         table.getSelectionModel().addListSelectionListener(event -> {
             if (!event.getValueIsAdjusting()) showSelected();
         });
@@ -242,8 +240,10 @@ final class ReplacePanel extends JPanel {
         DocumentListener ruleChanges = listener(this::commitRule);
         for (JTextField field : List.of(comment, url, path)) field.getDocument().addDocumentListener(ruleChanges);
         for (JTextArea field : List.of(match, replacement)) field.getDocument().addDocumentListener(ruleChanges);
+        for(javax.swing.text.JTextComponent field:List.of(comment,url,path,match,replacement))com.burpworkbench.platform.TextUndo.install(field,()->!loading&&!closed);
         target.addActionListener(event -> changeTarget());
         regex.addActionListener(event -> commitRule());
+        caseSensitive.addActionListener(event -> commitRule());
     }
 
     private static DocumentListener listener(Runnable action) {
@@ -254,9 +254,10 @@ final class ReplacePanel extends JPanel {
         };
     }
 
-    private int selected() { return table.getSelectedRow(); }
+    private int selected() { return com.burpworkbench.platform.TableSelection.lead(table); }
 
     private void showSelected() {
+        if(selected()!=displayedRow)settleEdits();
         captureSample();
         int row = selected();
         displayedRow = row;
@@ -267,6 +268,7 @@ final class ReplacePanel extends JPanel {
                 match.setText(""); replacement.setText(""); sample.setMessage(false, "");
                 sample.setSourceUrl(""); result.setSourceUrl("");
                 regex.setSelected(false);
+                caseSensitive.setSelected(false);
                 setEditorEnabled(false);
             } else {
                 RuleDraft item = rules.get(row);
@@ -275,6 +277,7 @@ final class ReplacePanel extends JPanel {
                 comment.setText(item.name()); url.setText(item.url()); path.setText(item.path());
                 match.setText(item.match()); replacement.setText(item.replacement());
                 regex.setSelected(item.regex());
+                caseSensitive.setSelected(item.caseSensitive());
                 sample.setBytes(isRequest(item.target()), samples.get(row));
                 String source = sampleUrls.get(row);
                 sample.setSourceUrl(source); result.setSourceUrl(source);
@@ -286,7 +289,7 @@ final class ReplacePanel extends JPanel {
     }
 
     private void setEditorEnabled(boolean enabled) {
-        for (JComponent field : List.of(target, comment, url, path, regex, match, replacement)) {
+        for (JComponent field : List.of(target, comment, url, path, regex, caseSensitive, match, replacement)) {
             field.setEnabled(enabled);
         }
         sample.setEnabled(enabled);
@@ -317,16 +320,33 @@ final class ReplacePanel extends JPanel {
         boolean behaviorChanged = !current.target().equals(target.getSelectedItem())
                 || !current.url().equals(url.getText()) || !current.path().equals(path.getText())
                 || !current.match().equals(match.getText()) || !current.replacement().equals(replacement.getText())
-                || current.regex() != regex.isSelected();
-        RuleDraft changed = new RuleDraft(current.enabled() && !behaviorChanged, comment.getText(),
+                || current.regex() != regex.isSelected() || current.caseSensitive() != caseSensitive.isSelected();
+        RuleDraft changed = new RuleDraft(current.enabled(), comment.getText(),
                 (String) target.getSelectedItem(), url.getText(), path.getText(),
-                match.getText(), replacement.getText(), regex.isSelected());
+                match.getText(), replacement.getText(), regex.isSelected(), caseSensitive.isSelected());
         if (current.equals(changed)) return;
         rules.set(row, changed);
         model.fireTableRowsUpdated(row, row);
         invalidatePreview();
-        if (current.enabled() && behaviorChanged) status.setText("Rule changed · turn On to apply");
+        if (behaviorChanged) {
+            try {
+                validateRule(changed);
+                status.setText("Rule changed · "+(changed.enabled()?"On":"Off"));
+            } catch(IllegalArgumentException invalid) { status.setText("Invalid rule · skipped: "+invalid.getMessage()); }
+        }
         onRulesChanged.accept(rules.snapshot());
+    }
+    private static void validateRule(RuleDraft rule){
+        if(rule.match().isEmpty())throw new IllegalArgumentException("Match is empty");
+        if(rule.match().length()>4096||rule.replacement().length()>4096)throw new IllegalArgumentException("Match / Replace limit: 4096 characters");
+        if(rule.regex())java.util.regex.Pattern.compile(rule.match());
+        ScopeMatcher.matches(rule,"https://example.test/");
+        if(!rule.path().isBlank())ScopeMatcher.pathMatches(rule.path(),"/");
+    }
+    void settleEdits(){
+        if(loading||closed||displayedRow<0||displayedRow>=rules.size())return;
+        RuleDraft rule=rules.get(displayedRow);if(!rule.enabled())return;
+        try{validateRule(rule);if(previewStatus.isVisible()&&!previewStatus.getText().isBlank())throw new IllegalArgumentException(previewStatus.getText());}catch(IllegalArgumentException invalid){int row=displayedRow;rules.set(row,rule.toggled(false));model.fireTableRowsUpdated(row,row);status.setText("Invalid rule · Off: "+invalid.getMessage());onRulesChanged.accept(rules.snapshot());}
     }
 
     private void invalidatePreview() {
@@ -350,6 +370,7 @@ final class ReplacePanel extends JPanel {
 
     private void add() {
         if (closed) return;
+        settleEdits();
         captureSample(); displayedRow = -1;
         RuleDraft fresh = new RuleDraft(false, "New rule", "Response body", "", "", "", "", false);
         samples.add(sampleFor(fresh.target()));
@@ -364,6 +385,7 @@ final class ReplacePanel extends JPanel {
 
     void addFromScope(String origin, String requestPath, boolean response, byte[] message, String issue) {
         if (closed) return;
+        settleEdits();
         captureSample(); displayedRow = -1;
         RuleDraft fresh = new RuleDraft(false, "New rule", response ? "Response header" : "Request header", origin,
                 ScopeMatcher.literalPath(requestPath), "", "", false);
@@ -383,39 +405,37 @@ final class ReplacePanel extends JPanel {
     }
 
     private void copy() {
-        int row = selected(); if (closed || row < 0) return;
+        settleEdits();
+        int[] rows=com.burpworkbench.platform.TableSelection.rows(table);if(closed||rows.length==0)return;
         captureSample(); displayedRow = -1;
-        samples.add(row + 1, samples.get(row));
-        sampleUrls.add(row + 1, sampleUrls.get(row));
-        selectAfterMutation(rules.duplicate(row));
+        int[] copies=new int[rows.length];
+        for(int n=rows.length-1;n>=0;n--){int row=rows[n];samples.add(row+1,samples.get(row).clone());sampleUrls.add(row+1,sampleUrls.get(row));rules.duplicate(row);copies[n]=row+1+n;}
+        selectAfterMutation(copies);
     }
 
     private void removeSelected() {
-        int row = selected(); if (closed || row < 0) return;
+        int[] rows=com.burpworkbench.platform.TableSelection.rows(table);if(closed||rows.length==0)return;
         captureSample(); displayedRow = -1;
-        rules.remove(row);
-        samples.remove(row);
-        sampleUrls.remove(row);
-        selectAfterMutation(Math.min(row, rules.size() - 1));
+        for(int n=rows.length-1;n>=0;n--){int row=rows[n];rules.remove(row);samples.remove(row);sampleUrls.remove(row);}
+        selectAfterMutation(Math.min(rows[0], rules.size() - 1));
     }
 
     private void move(int direction) {
-        int row = selected(); if (closed || row < 0) return;
+        settleEdits();
+        int[] rows=com.burpworkbench.platform.TableSelection.rows(table);if(closed||rows.length==0)return;
         captureSample();
-        int moved = rules.move(row, direction);
-        if (moved != row) {
-            displayedRow = -1;
-            byte[] localSample = samples.remove(row);
-            samples.add(moved, localSample);
-            sampleUrls.add(moved, sampleUrls.remove(row));
-            selectAfterMutation(moved);
-        }
+        displayedRow=-1;
+        int[] moved=com.burpworkbench.platform.TableSelection.move(rules.size(),rows,direction,(a,b)->{RuleDraft old=rules.get(a);rules.set(a,rules.get(b));rules.set(b,old);java.util.Collections.swap(samples,a,b);java.util.Collections.swap(sampleUrls,a,b);});
+        selectAfterMutation(moved);
     }
 
     private void selectAfterMutation(int row) {
+        selectAfterMutation(row<0?new int[0]:new int[]{row});
+    }
+    private void selectAfterMutation(int[] rows) {
         model.fireTableDataChanged();
-        if (row >= 0 && row < rules.size()) table.setRowSelectionInterval(row, row);
-        else showSelected();
+        com.burpworkbench.platform.TableSelection.select(table,rows);
+        showSelected();
         onRulesChanged.accept(rules.snapshot());
     }
 
@@ -511,7 +531,7 @@ final class ReplacePanel extends JPanel {
     RuleDraft ruleAt(int index) { return rules.get(index); }
 
     private static JButton button(String label, String name, Runnable action) {
-        JButton button = new JButton(label);
+        JButton button = com.burpworkbench.platform.ActionIcons.button(label);
         button.setName(name);
         button.addActionListener(event -> action.run());
         return button;

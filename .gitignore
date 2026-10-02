@@ -1,12 +1,30 @@
-.work/
 .old/
-target/
-.idea/
-.vscode/
-*.iml
-*.log
-*.tmp
-*.swp
-Thumbs.db
-Desktop.ini
-.DS_Store
+
+# Runtime output can contain Burp-owned, locked temporary files.
+/target/
+
+# Reproducible compiler output only; keep builds, reports and delivered JARs.
+/.work/**/classes/
+/.work/**/test-classes/
+/.work/**/generated-sources/
+/.work/**/generated-test-sources/
+/.work/**/maven-status/
+/.work/**/builds/**/tmp/
+/.work/**/builds/**/*.class
+/.work/0.4.6/history/work/*/tmp/
+/.work/**/burp*.tmp/
+
+# Expanded third-party dependencies from the old manual test runner.
+/.work/0.4.6/history/work/*/dependencies/
+/.work/0.4.6/history/work/**/*.class
+
+# Reference snapshots, source/fixtures and authored records remain in beta.
+!/.work/**/.ref/**
+!/.work/**/src/**
+!/.work/**/tests/**
+!/.work/**/docs/**
+!/.work/**/reports/**
+
+# Only legacy compiled test output; do not override authored test fixtures.
+/.work/0.4.6/history/work/track-e-all/com/burpworkbench/tests/*.class
+/.work/0.4.6/history/work/track-e-integrated-final/com/burpworkbench/tests/*.class

@@ -21,6 +21,9 @@ final class Comparison {
         View(String left,String right,List<Mark> marks,String note){this(left,right,marks,note,Side.plain(left),Side.plain(right),null);}
     }
     record Options(DiffEngine.Mode mode, boolean hex, boolean differencesOnly, String charset) {}
+    static Side preview(byte[] bytes, boolean hex, String charset) {
+        return render(decode(bytes,charset),List.of(),true,new Options(DiffEngine.Mode.Characters,hex,false,charset)).side;
+    }
     private static final Pattern CHARSET = Pattern.compile("(?im)^Content-Type:[^\\r\\n]*charset\\s*=\\s*[\"']?([^\\s;\"'\\r\\n]+)");
 
     static View prepare(byte[] a,byte[] b,Options options){return withFallback(a,b,options,()->build(a,b,options));}

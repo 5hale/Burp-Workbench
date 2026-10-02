@@ -2,7 +2,7 @@
 
 Burp Workbench는 공통 core 위에 여러 워크플로우 모듈을 묶은 단일 jar Burp Suite 확장입니다.
 
-현재 버전: `0.5.0`
+현재 버전: `0.5.1`
 
 ## 모듈
 
@@ -14,14 +14,14 @@ Burp Workbench는 공통 core 위에 여러 워크플로우 모듈을 묶은 단
 
 ## 지원 Burp 버전
 
-Burp Workbench `0.5.0`의 공식 지원 대상 범위는 Burp Suite
+Burp Workbench `0.5.1`의 공식 지원 대상 범위는 Burp Suite
 `2025.12` 이상부터 `2026.7.1` 이하까지입니다.
 
 | Burp Suite 버전 | Proxy 호환 모드 | 지원 여부 |
 |---|---|---|
 | `2025.12` 이상 ~ `2026.7.1` 이하 | `HISTORY_ID` | 지원 대상 범위 |
 | `2025.12` 미만 | — | 지원하지 않음 |
-| `2026.7.1` 초과 | 런타임 기능 자동 탐지 | `0.5.0` 지원 범위 밖 |
+| `2026.7.1` 초과 | 런타임 기능 자동 탐지 | `0.5.1` 지원 범위 밖 |
 
 지원 범위 안에서는 모두 같은 배포 jar를 사용합니다. 호환 모드는
 자동으로 선택되며 사용자가 별도로 설정할 필요가 없습니다. extension은
@@ -50,14 +50,15 @@ Extractor 기본 안전 한도는 decoded body 512 MiB, Beautify 대상 8 MiB입
 
 ## Extractor
 
-최상위 `Extractor` 탭은 필터 규칙을 작성·정렬하는 화면입니다. 추출은 기존 HTTP 우클릭 메뉴나 Search++ 결과에서 시작합니다. 출력 폴더 선택창의 `Beautify` 오른쪽에 `Filter`가 있으며 기본 OFF입니다.
+최상위 `Extractor` 탭은 필터 규칙 관리 화면입니다. 추출은 기존 HTTP 우클릭 메뉴나 Search++ 결과에서 시작하며 폴더 선택창의 Beautify 옆 Filter는 기본 OFF입니다.
 
-- OFF는 기존 추출 그대로입니다. ON은 저장 전에 본문·메타데이터·파일명에 현재 규칙을 적용합니다. 필터 실패 시 비필터 원문으로 대체 저장하지 않습니다.
-- 자동 탐지는 한국 휴대폰·이메일만 제공합니다. 휴대폰은 표기 형식/필드 문맥과 번호 유효성을 함께 보며 숫자 11자리만으로는 판정하지 않습니다. 다른 정보는 직접 규칙이 필요하며 완전한 익명화 기능은 아닙니다.
-- 특정 문자열과 `§회사_1§` 같은 자유 태그를 지정합니다. `LITERAL`은 문자열 그대로, `HOST`는 호스트 경계를 대소문자 구분 없이 매치합니다. 범위는 `ALL`·`BODY`·`METADATA`이고 위쪽 직접 규칙이 우선합니다. `§PHONE_1§` 같은 자동 태그는 한 추출 작업 안에서 일관되며 기존 태그와 충돌을 피합니다.
-- 규칙·순서·자동 탐지 선택과 미완성 입력도 Burp 프로젝트에 저장합니다. 규칙에 입력한 원문도 저장되므로 프로젝트를 보호하세요. 저장값을 읽거나 규칙을 검증하지 못하면 Filter ON을 막고 기존 저장값을 조용히 초기화하지 않습니다.
-- `filter_attributes.json`에는 태그·타입·근거·횟수를 기록하며 민감 원문값은 넣지 않습니다. 태그로 바뀐 JSON scalar는 문자열이 될 수 있습니다. Content-Type에 따라 JSON/HTML/XML/CSV/form/text를 처리하며 Filter 입력·디코딩 한도는 8 MiB입니다. 미지원·잘못된 데이터는 손실 변환 대신 거부합니다.
-- `Test file…`로 로컬 원본과 필터 결과를 비교합니다. 네트워크 요청은 보내지 않습니다. 설정하지 않은 정보는 남을 수 있으므로 공유 전에 결과를 확인하세요.
+- 새 프로젝트의 규칙 목록은 비어 있습니다. `Rulesets…`에서 원하는 템플릿만 선택 추가하고 수정/Copy합니다. 카테고리·검색은 규칙 관리용이지 개인정보 자동 분류가 아닙니다. 현재 룰셋은 초기 regex 모음이며 참고 도구의 전체 탐지 엔진과 같지 않습니다.
+- 기본 입력은 Name·Category·Regex·Pattern·Tag·자유 Description입니다. 접힌 Advanced에는 문자열/도메인 매치, Body/Headers/All 범위, 원문/파싱된 값, 캡처 그룹, 태그 번호, Content-Type·필드명·제외 regex 조건을 제공합니다. 그룹0은 전체 매치, 1이상은 해당 캡처 값만 치환합니다.
+- Ctrl/Shift 다중 선택으로 Copy/Remove/Up/Down을 일괄 처리합니다. 중앙 분할에 따라 목록 열 너비가 조절되고 Hide details는 선택·필터·입력값을 유지합니다. 규칙·순서·미완성 초안과 입력한 원문도 프로젝트에 저장하므로 프로젝트를 보호하세요.
+- Filter OFF는 기존 추출 그대로입니다. ON은 활성 규칙만 본문·메타데이터·파일명에 적용하며 실패 시 비필터 원문으로 대체 저장하지 않습니다. regex의 오탐·누락이 가능하며 완전한 익명화 기능이 아니므로 공유 전 결과를 확인하세요.
+- `§EMAIL_1§` 같은 번호 태그는 추출 작업 안에서 일관됩니다. 태그로 바뀐 JSON scalar는 문자열이 될 수 있습니다. `filter_attributes.json`에는 태그·카테고리·원래 타입·규칙ID·횟수를 기록하고 민감 원문은 넣지 않습니다. JSON/HTML/XML/CSV/form/text/HTTP 입력·디코딩 한도는8 MiB입니다.
+- `Test rules…`에서 파일/붙여넣기 입력을 검사하며 네트워크 요청은 보내지 않습니다. Input/Filtered 기본 Wrap, 입력 Ctrl+Z/Redo, 결과 태그 강조와 ‹/›·F3/Shift+F3·매치 행 선택으로 커서 이동을 제공합니다. Start/End는 매치 값/문서 내부 좌표이며 출력 절대 좌표가 아닙니다. 원문에 이미 같은 태그가 있으면 모호한 이동은 생략합니다.
+- 기존0.5.0 직접 규칙과 저장한 휴대폰/이메일 선택을 새 목록의 보이는 규칙으로 읽고 옛 저장값을 보존합니다. 탐지 선택은 수정 가능한 regex 템플릿이 되므로 이전 라이브러리 검증과 동일하다고 가정하지 마세요. 데모 설정은 가져오지 않으며 손상/외부 변경 저장값을 조용히 덮어쓰지 않습니다.
 
 ## Workbench 우클릭 메뉴
 
@@ -65,58 +66,35 @@ Extractor 기본 안전 한도는 decoded body 512 MiB, Beautify 대상 8 MiB입
 
 ## replace ++
 
-기본 `Match and replace` 바로 오른쪽의 `Proxy > replace ++`에서 엽니다. Replace와 Forward는 독립된 Enabled 설정을 갖습니다. Add·Copy·Remove·Up·Down과 인라인 편집을 제공합니다. Replace 목록/상세 및 Test 좌우 너비는 기본 50:50이고 Match·Replace는 낮은 높이로 시작합니다. 경계와 입력창 크기를 조절하고 상세 섹션을 접을 수 있습니다.
+기본 Match and replace 옆 `Proxy > replace ++`에서 엽니다. 관리 버튼은 툴팁이 있는 아이콘이며 Ctrl/Shift 다중 선택으로 Copy/Remove/Up/Down을 일괄 처리합니다. 목록 열은 중앙 분할 폭을 따르고 Hide details는 작업 배치를 유지합니다.
 
-- Type은 Request header/body, Response header/body, Request param name/value, Request first line의 7종입니다. 파라미터 룰은 URL query와 UTF-8 form-urlencoded 필드를 대상으로 하며 JSON 속성, multipart, Cookie는 포함하지 않습니다.
-- URL/origin은 HTTP(S) origin과 유효 포트까지 정확히 일치해야 합니다. Path는 query/fragment를 제외한 raw path를 사용합니다. `*`는 `/`를 넘지 않고, `**`는 하위 경로를 포함하며, `/api/**`는 `/api` 자체도 포함합니다. 빈 필드는 해당 조건을 제한하지 않습니다. URL·Path가 모두 비어 있거나 URL이 비어 있고 Path가 `**`이면 모든 origin/path가 대상입니다.
-- 활성 룰은 Proxy 메시지를 전달하기 직전에 목록 순서대로 적용됩니다. 새 룰은 OFF로 시작합니다. 범위나 치환 동작을 수정하면 다시 OFF가 되어 직접 켜야 하며 Comment만 수정하면 On을 유지합니다. Copy는 원본의 On 상태도 복사합니다. Burp 기본 Match and replace 룰과는 별도로 동작합니다.
-- `Hotkeys`에서 확장 단축키를 지정·변경·해제하며 기본값은 `Ctrl+Shift+Q`입니다. HTTP 메시지를 선택한 상태에서는 탭을 열고 origin과 Path가 채워진 새 OFF 룰을 만듭니다. 사용할 메시지가 없으면 탭만 엽니다. 변경한 단축키는 현재 확장 로드 동안만 유지되며 OS 전역 단축키는 아닙니다.
-- 우클릭 `Extensions > Burp Workbench > Send to replace ++`도 새 OFF 룰과 함께 Replace++를 엽니다. 현재 편집기의 요청을 우선하고 목록에서는 첫 선택 요청의 origin/Path를 사용합니다. 포커스된 Request/Response 전체를 Test Preview로 가져오며(최대 1 MiB), 텍스트 선택 범위로 자르지 않습니다. 네트워크 전송은 없으며 유효한 요청 범위가 없으면 메뉴를 비활성화합니다.
-- Test는 Burp 기본 요청/응답 편집기와 폰트·구문 강조를 사용합니다. On 상태 및 URL/Path 범위와 무관하게 선택한 룰의 Type·Match·Replace만 미리 확인하며 트래픽은 보내지 않습니다. 계산은 UI 밖에서 수행하고 오래된 작업 결과는 반영하지 않습니다.
-- 룰 필드·순서·개별 On·전체 Enabled는 현재 프로젝트의 extension data에 자동 저장합니다. Test 샘플과 단축키 지정은 저장하지 않습니다. Burp 재시작 후에도 유지하려면 저장 프로젝트를 사용해야 하며 임시 프로젝트는 보존되지 않을 수 있습니다. 잘못되거나 외부에서 변경된 저장 데이터를 조용히 덮어쓰지 않습니다.
-
-텍스트 body 치환은 선언된 charset을 사용하고, 선언이 없으면 UTF-8을 사용합니다. gzip/deflate body를 지원하며 Brotli body가 변경되면 압축을 풀어 전달합니다. 지원하지 않거나 잘못된 인코딩은 손실 변환하지 않고 건너뜁니다. Proxy 메시지/출력은 8 MiB, decoded text는 16 MiB, 헤더는 256 KiB로 제한하며 룰별·메시지별 시간 예산도 적용합니다. 잘못되거나 예산을 초과한 룰은 그 룰의 부분 변경을 반영하지 않고 건너뛰며, 앞서 성공한 변경은 유지될 수 있습니다. 무제한 바이너리 치환 기능은 아닙니다.
-
-저장된 룰이 없는 최초 사용 시 헤더 제거용 기본 룰 6개를 제공합니다. 모두 `Request header`, Regex, 빈 Replace 및 **OFF** 상태이며 URL/Path는 제한하지 않습니다. 필요한 룰에만 범위를 설정하고 On을 켜세요.
-
-| 기본 룰 | Match |
-|---|---|
-| If-Modified-Since 제거 | `(?im)^If-Modified-Since.*$` |
-| If-None-Match 제거 | `(?im)^If-None-Match.*$` |
-| Sec-CH 계열 제거 | `(?im)(s|S)ec-(c|C)h.*` |
-| Sec-Fetch 계열 제거 | `(?im)(s|S)ec-(f|F)etch.*` |
-| Cache-Control 제거 (선택) | `(?im)^Cache-Control:.*$` |
-| Pragma 제거 (선택) | `(?im)^Pragma:.*$` |
-
-기본 패턴의 `(?im)`은 대소문자를 무시하고 `^`/`$`를 각 헤더 줄 기준으로 적용합니다. 기존 사용자 룰의 정규식 동작은 변경하지 않습니다. 캐시 지시나 브라우저 메타데이터를 제거하면 캐시·서버 검사 동작이 달라질 수 있습니다. Cookie·Authorization·Origin·Referer는 기본 룰로 제거하지 않습니다. 이미 저장한 룰은 빈 목록도 그대로 복원하며 기본 룰을 덧붙이거나, 지운 룰을 다시 생성하지 않습니다.
+- 전체 Enabled 버튼은 제거했습니다. 정상 세션은 상시 활성이고 실제 적용은 개별 규칙 On으로 관리합니다. 새 규칙은 OFF입니다. 정상 편집은 기존 ON/OFF를 유지하고 오류 초안도 편집은 허용하되 규칙/페이지에서 떠날 때 OFF 처리합니다. 원래 OFF는 자동 ON되지 않습니다. 텍스트 입력에 Ctrl+Z/Redo를 제공합니다.
+- 치환 매치는 기본 대소문자 구분 없이 동작하며 Match case를 켜면 Literal/Regex 모두 대소문자를 구분합니다. URL/origin·Path 조건 정책은 별개입니다.
+- 요청/응답 첫 줄·헤더·본문 및 요청 query/form 파라미터를 지원합니다. 요청 헤더는 요청 첫 줄을 제외하며 Response first line은 헤더/본문을 건드리지 않고 HTTP 버전·상태·문구를 바꿉니다. 전체 바이너리·임의 구조 파라미터·multipart·trailer 치환은 제공하지 않습니다.
+- Origin은 정확한 `http(s)://host[:port]`, Path는 query를 제외한 raw path glob입니다. `*`는 segment 안, `**`는 segment를 넘으며 빈 조건은 제한 없음입니다.
+- Test Preview는 방향에 맞는 Burp 기본 편집기로 샘플/결과를 보여주며 트래픽은 보내지 않습니다. 좌우 너비는 기본 동일하고 규칙 입력창은 낮게 시작합니다. 기본 Ctrl+Shift+Q 범위 수집은 새 OFF 규칙과 포커스된 전체 요청/응답 샘플을 가져옵니다.
+- 규칙·순서·개별 On·Match case는 프로젝트에 저장합니다. schema1은 case-ignore로 읽고 schema2는 명시 플래그 및 이전 백업을 유지합니다. Test 샘플/핫키 변경은 룰 저장 대상이 아니며 손상/외부 변경 저장값은 조용히 초기화하지 않습니다.
+- Proxy 전송 직전 목록 순서로 처리합니다. 불량/예산 초과 규칙의 부분 변경은 반영하지 않습니다. 안전 한도는 메시지/출력8 MiB, 디코딩 text16 MiB, 헤더256 KiB, 적용 규칙1,000개, 규칙250ms·엔진 합계1초이며 범위 preflight는 별도250ms입니다. Query/form은UTF-8, 본문은 선언 charset과gzip/deflate를 유지하며 수정된Brotli 본문은content coding 없이 내보냅니다.
 
 ### Forward
 
-Forward는 Workbench 치환 이후 Proxy 요청의 실제 목적지를 변경합니다. 브라우저 리다이렉트나 추가 요청 전송이 아니므로 주소창·Proxy history에는 Source가 보여도 응답은 Destination에서 올 수 있습니다.
+Source URL | Source Path, Destination URL | Destination Path 두 줄로 입력합니다. Forward는 Replace 후 항상 마지막에 적용하며 목록 순서에서 마지막 유효 매치가 우선합니다. HttpService·Host와 선택적 Path를 변경하고 raw query는 보존합니다. 브라우저 주소창 변경이나 별도 요청 전송이 아닙니다.
 
-- 입력 배치는 `Source URL | Source Path`, `Destination URL | Destination Path`입니다. Source는 Replace와 같은 origin/path 조건이며 Destination URL은 포트를 포함할 수 있는 HTTP(S) origin입니다. 경로는 Destination Path에 입력합니다.
-- 양쪽 Path가 비면 실제 요청 경로를 유지합니다. Destination Path가 비면 실제 경로를 유지하고, 값이 있으면 그 경로로 바꿉니다. Source Path가 비면 모든 경로가 매치됩니다. 원래 raw query는 유지합니다.
-- 활성 규칙을 원래 Source URL 기준으로 목록 순서대로 검사하며 마지막 유효한 일치 규칙이 최종 목적지입니다. Workbench Replace 이후 항상 Forward를 적용하여 연결 서비스와 Host를 바꿉니다. 다른 Burp 확장의 실행 순서를 통제하는 기능은 아닙니다.
-- Forward 규칙·전체 Enabled는 별도로 프로젝트에 저장합니다. 최초 사용은 빈 목록/OFF이고 새 규칙도 OFF입니다. Test는 목적지 URL만 계산하고 트래픽은 보내지 않습니다.
+Source URL은 정확한 origin입니다. Destination Path가 비면 실제 요청 경로를 유지하고 Source Path가 비면 경로 조건에 제한이 없습니다. 둘 다 비면 매치된 요청 경로를 유지합니다. 최초 목록과 새 규칙은 OFF이며 Test는 목적지만 계산합니다.
 
-### 0.5.0 업그레이드
+### 0.5.1 업그레이드
 
-기존 0.4.9 Replace 규칙·순서·On·전체 Enabled를 유지합니다. 독립 데모 규칙은 가져오지 않습니다. 새 Forward는 빈 목록/OFF이고 기존 제품 Decoder 단축키 설정은 유지합니다. 새 JAR 로드 전 이전 확장·독립 데모를 unload하여 중복 등록을 피하세요.
+기존 제품 Replace/Forward 규칙·개별 On은 이어서 사용합니다. 이전 전체 Enabled는 정상 세션을 더 이상 비활성화하지 않습니다. 데모 규칙은 가져오지 않습니다. Extractor의 기존 선택 읽기 방식은 위 설명을 따릅니다. 중복 핸들러를 피하려면 새 JAR 로드 전 이전 확장/독립 데모를 unload하세요.
 
 ## compare ++
 
-`replace ++` 바로 오른쪽의 `Proxy > compare ++`에서 엽니다. Paste/Load로 텍스트를 가져오거나, HTTP 편집기의 우클릭 메뉴 또는 변경 가능한 기본 단축키 `Ctrl+Shift+W`을 사용합니다. 포커스된 편집기에서 Request/Response를 구분하고 선택 영역이 있으면 해당 byte 구간을 Text로 가져옵니다. History/Site map 목록에서의 단축키 수집은 하지 않습니다. 처음 두 항목은 A/B에 자동 배정하고 이후 가져온 항목은 현재 비교 쌍을 바꾸지 않습니다. 좌우 항목을 선택하면 같은 탭에서 바로 비교합니다.
+Replace++ 옆 `Proxy > compare ++`에서 엽니다. HTTP 편집기 우클릭/기본 Ctrl+Shift+W로 수집하며 선택 byte는 Text로 가져옵니다. Paste/Load와 `+` 빈 항목도 지원합니다. 처음 두 수집은 A/B 자동 지정, +는 빈 쪽부터 사용하고 양쪽이 있으면 마지막 활성 쪽(초기A)에 새 항목을 지정합니다.
 
-- Words·유니코드 Characters·정확한 Bytes 비교, A/B 각각의 Pretty/Raw/Hex와 Auto/UTF-8/MS949/ISO-8859-1 디코딩을 지원합니다. Raw/Hex는 원본이고 Hex는 고정폭 글꼴로 byte·ASCII 열을 정렬합니다.
-- Pretty는 내장 formatter로 JS/JSON 표시용 복사본을 정리합니다. Pretty/Raw·Hex 혼합 비교는 정리 공백도 차이에 포함하고 양쪽 Pretty는 공백만의 차이를 숨길 수 있습니다. 위치는 각 표현 기준(Pretty는 정리 복사본 UTF-8)이며 HTTP 헤더는 원본 본문을 설명합니다. 미지원/손실 디코딩은 해당 쪽만 Raw로 돌아갑니다.
-- Pretty/Raw는 테마 적용 일반 입력창 기본 폰트(Bold 추가 없음), 구문색과 Modified/Deleted/Added 배경색을 사용합니다. Burp native Pretty·Inspector가 아닌 자체 렌더러이며 저장 항목과 Repeater용 원래 요청은 바꾸지 않습니다.
-- 항목을 받으면 현재 화면을 유지하고 Compare 탭을 선택할 때까지 주황색으로 표시합니다. 깜빡이지 않습니다. Compare/Replace 핫키를 Workbench 소유 창에서도 처리하며 단축키 설정 입력 중에는 실행하지 않습니다.
-- 위쪽 차이 화살표 및 `Alt+Up`/`Alt+Down`은 좌우 차이 구간을 이동합니다. `Find`는 마지막 포커스 본문의 문자열 검색 전용으로, Enter/Shift+Enter와 별도 화살표가 검색 일치 위치를 이동합니다. 빈 Find는 아무 동작도 하지 않으며 검색 화살표가 비활성화됩니다. `Ctrl+F`로 Find에 이동합니다.
-- `Differences only`는 원본 bytes를 유지한 채 같은 구간을 숨깁니다. 동기 스크롤, Wrap, 패널 크기 조절, 목록 정렬, Remove/Clear와 비교 취소를 지원합니다.
-- 좌우 본문에서 `Ctrl+R`은 해당 항목의 원래 요청을 Repeater에 추가할 뿐 Send하지 않습니다. Response/선택 영역도 가능한 경우 원래 요청과 서비스를 함께 보관합니다. Paste/Load 텍스트는 원래 서비스가 없으므로 목적지를 추측해 보내지 않습니다.
-- 수집 목록과 단축키 지정은 현재 확장 로드 동안만 유지하며 프로젝트에 저장하지 않습니다. 입력당1MiB, 전체200개/32MiB로 제한하며 Repeater용 원래 요청도 총량에 포함합니다. 1MiB를 넘는 원래 요청은 Repeater용으로 보관하지 않습니다.
-
-비교는 UI 밖에서 실행하며 작은 차이와 큰 차이에 각각 정확한 비교 경로를 사용합니다. 큰 차이는 선형 보조 메모리로 계산합니다. 4초 diff 계산 예산과 취소 검사를 유지하며 디코딩·화면 렌더링은 이 계산 예산에 포함되지 않습니다. 비교를 끝내지 못하면 원문과 실패 이유를 표시하고, 빈 화면이나 잘못된 '차이 없음' 결과로 처리하지 않습니다. Compare++는 트래픽 핸들러를 등록하거나 Replace++ 룰을 변경하지 않습니다.
+- A/B 각각 Pretty/Raw/Hex·인코딩·내용을 설정하고 한쪽만 있어도 보기/설정/Find가 됩니다. Raw 전체 보기에는 Ctrl+Z/Redo 편집을 제공합니다. Pretty/Hex/Differences only와 손실 디코딩은 읽기 전용입니다. 같은 항목도 A/B 수정본은 독립이며 원본 byte를 보존합니다. ↶는 해당 쪽 원본 복구입니다.
+- 편집250ms 후 차이를 갱신하고 커서/Undo를 유지합니다. Words·Unicode Characters·Bytes, 정확한 차이, Sync·Wrap·Differences only와 문자열 Find를 유지합니다. 빈 Find는 차이 이동을 하지 않으며 Alt+Up/Down은 차이, Enter/Shift+Enter는 검색 결과로 이동합니다.
+- Items 목록은 Ctrl/Shift 일괄 Copy/Remove, 열 너비 조절, 기존 표시/숨기기를 지원합니다. Copy는 작업 내용을 사용하며 명시적 Repeater(Ctrl+R)는 수집한 원본 요청을 사용합니다. 수집/비교가 네트워크 Send를 수행하지 않습니다.
+- 한도는 항목1 MiB·200개·전체32 MiB(원본 요청/수정본 포함)입니다. Compare는 프로젝트에 저장하지 않고 unload 때 해제합니다.
+- 새 수집은 포커스를 빼앗거나 반짝이지 않고 선택 전까지 탭을 주황색으로 표시합니다. Replace 미리보기의 Burp 기본 Pretty/Raw/Hex는 그대로 유지합니다.
 
 ## decoder ++
 
@@ -134,10 +112,10 @@ HTTP 편집기 우클릭 `Extensions > Burp Workbench > decode ++`로 엽니다.
 프로젝트를 빌드한 뒤 아래 shaded jar를 Burp Suite에 로드합니다.
 
 ```text
-target\burp-workbench-extension-0.5.0.jar
+target\burp-workbench-extension-0.5.1.jar
 ```
 
-이 단일 shaded jar가 지원하는 모든 Burp 버전의 공통 배포 파일입니다. `target\original-burp-workbench-extension-0.5.0.jar`는 설치하지 마세요. 이 파일은 Maven이 남기는 unshaded backup이며 Brotli/Rhino 같은 번들 런타임 의존성이 포함되지 않습니다.
+이 단일 shaded jar가 지원하는 모든 Burp 버전의 공통 배포 파일입니다. `target\original-burp-workbench-extension-0.5.1.jar`는 설치하지 마세요. 이 파일은 Maven이 남기는 unshaded backup이며 Brotli/Rhino 같은 번들 런타임 의존성이 포함되지 않습니다.
 
 ## 빌드
 
@@ -155,11 +133,11 @@ mvn package
 예상 빌드 산출물:
 
 ```text
-target\burp-workbench-extension-0.5.0.jar
-target\original-burp-workbench-extension-0.5.0.jar
+target\burp-workbench-extension-0.5.1.jar
+target\original-burp-workbench-extension-0.5.1.jar
 ```
 
-Burp에 로드할 배포 산출물은 `target\burp-workbench-extension-0.5.0.jar` 하나뿐입니다.
+Burp에 로드할 배포 산출물은 `target\burp-workbench-extension-0.5.1.jar` 하나뿐입니다.
 
 ## 아키텍처
 

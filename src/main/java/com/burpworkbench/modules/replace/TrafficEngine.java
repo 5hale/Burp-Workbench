@@ -35,6 +35,7 @@ final class TrafficEngine {
     private static final long RULE_NANOS = 250_000_000L;
     private static final long MESSAGE_NANOS = 1_000_000_000L;
     private static final Pattern REQUEST_LINE = Pattern.compile("[^\\s]+[\\t ]+([^\\s]+)[\\t ]+HTTP/\\d+(?:\\.\\d+)?");
+    private static final Pattern RESPONSE_LINE = Pattern.compile("HTTP/\\d+(?:\\.\\d+)?[\\t ]+\\d{3}(?:[\\t ][^\\r\\n\\x00]*)?");
     private static final Pattern CHARSET = Pattern.compile("(?i)(?:^|;)\\s*charset\\s*=\\s*(?:\"([^\"]+)\"|([^;\\s]+))");
 
     record Result(byte[] message, int replacements, List<String> issues) {}
@@ -92,7 +93,7 @@ final class TrafficEngine {
 
     /** Test isolates this rule; URL/path scopes apply only to live traffic. */
     static Result preview(RuleDraft rule, boolean request, byte[] message) {
-        RuleDraft testRule = new RuleDraft(true, rule.name(), rule.target(), "", "", rule.match(), rule.replacement(), rule.regex());
+        RuleDraft testRule = new RuleDraft(true, rule.name(), rule.target(), "", "", rule.match(), rule.replacement(), rule.regex(), rule.caseSensitive());
         return transform(List.of(testRule), "", request, message);
     }
 
@@ -105,10 +106,12 @@ final class TrafficEngine {
     private static Change apply(Message message, RuleDraft rule, Replacement replacement) throws IOException {
         byte[] input = message.raw;
         String type = rule.target();
-        if (type.equals(RuleTypes.REQUEST_FIRST_LINE)) {
+        if (type.equals(RuleTypes.REQUEST_FIRST_LINE) || type.equals(RuleTypes.RESPONSE_FIRST_LINE)) {
             TextChange changed = replacement.apply(message.firstLine);
             if (changed.text().equals(message.firstLine)) return new Change(input, changed.count());
-            if (!REQUEST_LINE.matcher(changed.text()).matches()) throw new IllegalArgumentException("Replacement creates an invalid request first line");
+            Pattern line = type.equals(RuleTypes.REQUEST_FIRST_LINE) ? REQUEST_LINE : RESPONSE_LINE;
+            if (changed.text().indexOf('\r') >= 0 || changed.text().indexOf('\n') >= 0 || changed.text().indexOf('\0') >= 0 || !line.matcher(changed.text()).matches())
+                throw new IllegalArgumentException("Replacement creates an invalid HTTP first line");
             return new Change(message.withHead(changed.text(), message.headers), changed.count());
         }
         if (type.equals(RuleTypes.REQUEST_HEADER) || type.equals(RuleTypes.RESPONSE_HEADER)) {
@@ -391,7 +394,7 @@ final class TrafficEngine {
             int end = head.indexOf(newline);
             String first = end < 0 ? head : head.substring(0, end);
             boolean isRequest = REQUEST_LINE.matcher(first).matches();
-            boolean isResponse = first.matches("HTTP/\\d+(?:\\.\\d+)?[\\t ]+\\d{3}(?:[\\t ].*)?");
+            boolean isResponse = RESPONSE_LINE.matcher(first).matches();
             if (request ? !isRequest : !isResponse) throw new IllegalArgumentException("Message does not match request/response direction");
             String headers = end < 0 ? "" : head.substring(end + newline.length());
             return new Message(raw, boundary + newline.length() * 2, first, headers, newline, charset);
@@ -461,7 +464,9 @@ final class TrafficEngine {
             if (rule.match().length() > 4096 || rule.replacement().length() > 4096) throw new IllegalArgumentException("Match/Replace exceeds 4096 characters");
             this.rule = rule; this.deadline = deadline; this.clock = clock;
             check();
-            pattern = rule.regex() ? Pattern.compile(rule.match()) : null;
+            int flags = rule.caseSensitive() ? 0 : Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE;
+            pattern = rule.regex() ? Pattern.compile(rule.match(), flags)
+                    : rule.caseSensitive() ? null : Pattern.compile(rule.match(), flags | Pattern.LITERAL);
         }
 
         void check() {
@@ -475,7 +480,8 @@ final class TrafficEngine {
             Matcher matcher = pattern.matcher(new TimedSequence(text, this));
             if (!matcher.find()) { check(); return new TextChange(text, 0); }
             StringBuilder output = new StringBuilder(Math.min(text.length(), 64 * 1024));
-            long references = rule.replacement().chars().filter(ch -> ch == '$').count();
+            String replacementText = rule.regex() ? rule.replacement() : Matcher.quoteReplacement(rule.replacement());
+            long references = rule.regex() ? rule.replacement().chars().filter(ch -> ch == '$').count() : 0;
             int count = 0, cursor = 0;
             do {
                 check();
@@ -485,7 +491,7 @@ final class TrafficEngine {
                     if (matcher.start(group) >= 0) largest = Math.max(largest, matcher.end(group) - matcher.start(group));
                 }
                 checkSize((long) output.length() + matcher.start() - cursor + rule.replacement().length() + references * largest, MAX_TEXT_BYTES);
-                matcher.appendReplacement(output, rule.replacement());
+                matcher.appendReplacement(output, replacementText);
                 cursor = matcher.end(); count++;
             } while (matcher.find());
             checkSize((long) output.length() + text.length() - cursor, MAX_TEXT_BYTES);

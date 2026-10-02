@@ -1,0 +1,24 @@
+Extractor rules demo 0.5.1: curated regex adaptations
+
+Gitleaks
+https://github.com/gitleaks/gitleaks/tree/b58d3f102cf3a2c84cb7f923d05c25c9b1aed84b
+Source: config/gitleaks.toml. MIT license: Gitleaks-MIT.txt.
+Adapted AWS, GitHub, Slack, Stripe and private-key patterns to Java regex.
+Entropy checks, allowlists, keyword prefilters and upstream execution behavior are not imported.
+
+Sensitive Discoverer
+https://github.com/PortSwigger/sensitive-discoverer/tree/08fe769301487cfd9ac7ea44d72eff043271c8a5
+Sources: src/main/resources/regexes/regex_general.jsonc and regex_token.jsonc.
+Apache-2.0 license: SensitiveDiscoverer-Apache-2.0.txt.
+Generic API-key/secret capture groups and private IPv4 ranges/octet boundaries were adapted.
+Upstream refiner behavior is not imported. Modified patterns are opt-in templates, not equivalent detectors.
+
+Presidio
+https://github.com/data-privacy-stack/presidio/tree/d4ccc6bcb6b6a7144336fe93b7839e61e251301b
+Source: presidio-analyzer/presidio_analyzer/predefined_recognizers/generic/email_recognizer.py.
+MIT license: Presidio-MIT.txt. Email pattern adapted with ASCII domain/boundary restrictions.
+No NLP, confidence scoring, recognizer validation or TLD validation imported.
+
+KR phone patterns and quoted-digit/adjacent-label/field-password examples are Burp Workbench adaptations or original examples.
+libphonenumber research informs the KR pattern, but rules do not execute number validation.
+These templates identify shapes/context chosen by the user; they do not guarantee personal-data or credential accuracy.

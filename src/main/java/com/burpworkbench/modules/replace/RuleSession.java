@@ -15,6 +15,8 @@ final class RuleSession {
         RuleStore.State loaded;
         try {
             loaded = store.load();
+            // The old global flag is no longer a user setting. Individual rule On remains authoritative.
+            loaded = new RuleStore.State(loaded.rules(), true);
             status = "Project rules loaded";
         } catch (RuleStore.StoreException failure) {
             loaded = new RuleStore.State(List.of(), false);
@@ -32,7 +34,7 @@ final class RuleSession {
     }
 
     synchronized void enabledChanged(boolean enabled) {
-        update(new RuleStore.State(state.get().rules(), enabled));
+        // Compatibility entry point for callers predating the always-on UI policy.
     }
 
     private void update(RuleStore.State changed) {

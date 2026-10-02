@@ -194,7 +194,7 @@ final class ProxyTrafficHandler implements ProxyRequestHandler, ProxyResponseHan
         return switch (target) {
             case RuleTypes.REQUEST_HEADER, RuleTypes.REQUEST_BODY, RuleTypes.REQUEST_FIRST_LINE,
                     RuleTypes.REQUEST_PARAM_NAME, RuleTypes.REQUEST_PARAM_VALUE -> request;
-            case RuleTypes.RESPONSE_HEADER, RuleTypes.RESPONSE_BODY -> !request;
+            case RuleTypes.RESPONSE_HEADER, RuleTypes.RESPONSE_BODY, RuleTypes.RESPONSE_FIRST_LINE -> !request;
             default -> false;
         };
     }

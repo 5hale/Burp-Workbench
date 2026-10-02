@@ -1,139 +1,95 @@
 package com.burpworkbench.modules.extractor.filter;
-
-import com.google.i18n.phonenumbers.PhoneNumberUtil;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.util.*;
+import java.util.function.BooleanSupplier;
 import java.util.regex.*;
 import static com.burpworkbench.modules.extractor.filter.FilterSettings.*;
 
-/** One extraction run: stable short tags, no original values in exported attributes. */
+/** Ordered user rules only. Tags protected; no automatic phone/email branch. */
 public final class FilterSession {
-    private static final Pattern TAG=Pattern.compile("§[^§\\r\\n]{1,80}§");
-    private static final Pattern EMAIL=Pattern.compile("(?<![\\w.!#$%&'*+/=?^`{|}~@-])[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+(?![\\w@-])");
-    private static final Pattern PHONE=Pattern.compile("(?<![\\p{L}\\d])(?:010[- .]?\\d{4}[- .]?\\d{4}|\\+82[- .]?10[- .]?\\d{4}[- .]?\\d{4})(?![\\p{L}\\d])");
-    private static final Pattern PHONE_CONTEXT=Pattern.compile("(?i)(?<![\\p{L}\\d_])(?:phone|mobile|tel|휴대폰|휴대전화|전화번호|연락처)[\\s_:-]*$");
-    private final FilterSettings settings;
-    private final List<PreparedRule> preparedRules;
-    private record PreparedRule(Rule rule,int index,Pattern host){}
-    private final java.util.function.BooleanSupplier cancelled;
-    private final Map<String,String> identities=new HashMap<>();
-    private final Map<String,Attribute> attributes=new LinkedHashMap<>();
-    private final Set<String> reserved=new HashSet<>(), generated=new HashSet<>();
-    private final Map<String,Integer> sequence=new HashMap<>();
-    private int hits;
-    private record Span(int start,int end,String tag,String type,String originalType,String evidence,int rule){}
-    private static final class Attribute {
-        final String tag,type,evidence;final int rule;int occurrences;
-        final Set<String> originalTypes=new TreeSet<>();
-        Attribute(Span s){tag=s.tag;type=s.type;evidence=s.evidence;rule=s.rule;}
-        Map<String,Object> row(){return Map.of("tag",tag,"type",type,"originalTypes",originalTypes,"evidence",evidence,"rule",rule,"occurrences",occurrences);}
-    }
-    public record Result(String original,String text,String format,List<String> warnings,int matches) {
-        public byte[] bytes(){return text.getBytes(StandardCharsets.UTF_8);}
-    }
+    private static final Pattern TAG=Pattern.compile("§[^§\\r\\n]{1,100}§");
+    private record Prepared(Rule rule,Pattern pattern,Pattern mime,Pattern field,Pattern exclude,int index){}
+    private final List<Prepared> prepared=new ArrayList<>();private final BooleanSupplier cancelled;
+    private final Set<String> reserved=new HashSet<>(),generated=new HashSet<>();
+    private final Map<String,String> identities=new HashMap<>();private final Map<String,Integer> sequence=new HashMap<>();
+    private final Map<String,Map<String,Object>> attributes=new LinkedHashMap<>();private final List<Hit> locations=new ArrayList<>();private int hits;
+    public record Hit(String ruleId,String ruleName,String tag,int start,int end,String context){}
+    public record Result(String original,String text,String format,List<String> warnings,int matches){public byte[] bytes(){return text.getBytes(StandardCharsets.UTF_8);}}
     public FilterSession(FilterSettings settings){this(settings,()->false);}
-    public FilterSession(FilterSettings settings,java.util.function.BooleanSupplier cancelled){
-        this.settings=settings;this.cancelled=cancelled;
-        List<PreparedRule> prepared=new ArrayList<>();int index=0;
+    public FilterSession(FilterSettings settings,BooleanSupplier cancelled){
+        this.cancelled=cancelled;int index=0;
         for(Rule r:settings.rules()){
-            reserved.add(r.tag());
-            Pattern host=r.match()==Match.HOST?Pattern.compile("(?<![A-Za-z0-9_.@-])"+Pattern.quote(r.source())+"(?![A-Za-z0-9_.-])",Pattern.CASE_INSENSITIVE):null;
-            // Preserve Pattern's code-point handling for supplementary/malformed UTF-16 rules.
-            if(host==null&&r.source().chars().anyMatch(c->Character.isSurrogate((char)c)))host=Pattern.compile(Pattern.quote(r.source()));
-            prepared.add(new PreparedRule(r,++index,host));
+            index++;if(!r.enabled())continue;
+            String regex=switch(r.match()){case REGEX->r.source();case LITERAL->Pattern.quote(r.source());case HOST->"(?i)(?<![A-Za-z0-9_.@-])"+Pattern.quote(r.source())+"(?![A-Za-z0-9_.-])";};
+            prepared.add(new Prepared(r,Pattern.compile(regex),optional(r.contentType()),optional(r.field()),optional(r.exclude()),index));reserved.add(r.tag());
         }
-        preparedRules=List.copyOf(prepared);
     }
+    private static Pattern optional(String pattern){return pattern.isEmpty()?null:Pattern.compile(pattern);}
     private void check(){Documents.check();if(cancelled.getAsBoolean())throw new java.util.concurrent.CancellationException();}
     public int hits(){return hits;}
-    public List<Map<String,Object>> attributes(){return attributes.values().stream().map(Attribute::row).toList();}
+    public List<Map<String,Object>> attributes(){return attributes.values().stream().map(Map::copyOf).toList();}
+    public List<Hit> locations(){return List.copyOf(locations);}
     public Result filter(Documents.Input input)throws Exception{
-        check();Documents.Doc doc=Documents.parse(input);check();reserve(doc.source);
-        for(var s:doc.slots)reserve(s.text);
-        int before=hits;Map<Integer,String> values=new HashMap<>();
-        for(var slot:doc.slots){
-            Scope scope=slot.context.startsWith("http/")?Scope.METADATA:Scope.BODY;
-            String changed=replace(slot.text,slot.field,slot.originalType,scope,!slot.originalType.equals("key"));
-            if(!changed.equals(slot.text))values.put(slot.id,changed);
-        }
-        return new Result(doc.source,doc.render(values),doc.format.name(),List.copyOf(doc.warnings),hits-before);
+        Snapshot snapshot=new Snapshot();
+        try{return filterInput(input);}catch(Exception|StackOverflowError e){snapshot.restore();throw e;}
     }
-    /** Metadata retains request target/version/Host port; never constructs a request line. */
-    public String metadata(String value){reserve(value);return replace(value,"","string",Scope.METADATA,true);}
-    public String filename(String value){
-        String filtered=metadata(value).replaceAll("[<>:\"/\\\\|?*\\p{Cntrl}]","_").replaceAll("[. ]+$","");
-        if(filtered.isBlank()||filtered.equals(".")||filtered.equals(".."))return "item";
-        return filtered;
-    }
-    public Path path(Path path){
-        Path out=Path.of("");int index=0;
-        for(Path segment:path){String value=segment.toString();
-            Matcher port=Pattern.compile("^(.*)(_\\d+)$").matcher(value);
-            if(index++==0&&port.matches())value=filename(port.group(1))+port.group(2);
-            else value=filename(value);
-            out=out.resolve(value);
-        }return out;
-    }
-    private void reserve(String value){
-        Matcher m=TAG.matcher(value);
-        while(m.find()){
-            if(generated.contains(m.group()))throw new IllegalArgumentException("기존 태그와 자동 태그 충돌: 이 항목은 저장하지 않습니다.");
-            reserved.add(m.group());
-        }
-    }
-    private String replace(String value,String field,String originalType,Scope scope,boolean auto){
-        check();List<Span> spans=new ArrayList<>();
-        Matcher existing=TAG.matcher(value);while(existing.find())spans.add(new Span(existing.start(),existing.end(),existing.group(),"EXISTING",originalType,"",0));
-        // User order is priority. Match on the ORIGINAL string, never on emitted tags.
-        for(PreparedRule prepared:preparedRules){
-            Rule rule=prepared.rule();int ruleIndex=prepared.index();
-            if(rule.scope()!=Scope.ALL&&rule.scope()!=scope)continue;
-            check();
-            if(prepared.host()==null){
-                int cursor=0,start;
-                while((start=value.indexOf(rule.source(),cursor))>=0){
-                    int end=start+rule.source().length();limit(spans);
-                    if(free(spans,start,end))spans.add(new Span(start,end,rule.tag(),"CUSTOM",originalType,"literal rule "+ruleIndex,ruleIndex));
-                    cursor=end;
+    private Result filterInput(Documents.Input input)throws Exception{
+        check();Documents.Doc doc=Documents.parse(input);reserve(doc.source);int before=hits;String original=doc.source;Map<Integer,String> values=new HashMap<>();
+        String mime=input.contentType().split(";",2)[0].trim();
+        if(doc.format==Documents.Format.HTTP){Matcher header=Pattern.compile("(?im)^Content-Type:\\s*([^;\\r\\n]+)").matcher(doc.source);if(header.find())mime=header.group(1).trim();}
+        if(mime.isEmpty())mime=switch(doc.format){case JSON->"application/json";case HTML->"text/html";case XML->"application/xml";default->"text/plain";};
+        for(Prepared p:prepared){
+            check();RegexBudget budget=new RegexBudget(cancelled);if(p.mime!=null&&!p.mime.matcher(budget.wrap(mime)).find())continue;
+            if(p.rule.target()==Target.VALUES){
+                for(var slot:doc.slots){
+                    Scope scope=slot.context.startsWith("http/")?Scope.METADATA:Scope.BODY;if(!applies(p.rule,scope))continue;
+                    if(p.field!=null&&!p.field.matcher(budget.wrap(slot.field)).find())continue;
+                    String value=values.getOrDefault(slot.id,slot.text),changed=replace(value,p,slot.originalType,slot.context,budget);if(!changed.equals(value))values.put(slot.id,changed);
                 }
             }else{
-                Matcher m=prepared.host().matcher(value);
-                while(m.find()){limit(spans);if(free(spans,m.start(),m.end()))spans.add(new Span(m.start(),m.end(),rule.tag(),"CUSTOM",originalType,"literal rule "+ruleIndex,ruleIndex));}
+                String rendered=doc.render(values),changed;
+                if(doc.format==Documents.Format.HTTP){
+                    int boundary=rendered.indexOf("\r\n\r\n"),separator=4;if(boundary<0){boundary=rendered.indexOf("\n\n");separator=2;}if(boundary<0)throw new IllegalArgumentException("HTTP header boundary missing");
+                    String head=rendered.substring(0,boundary),body=rendered.substring(boundary+separator);
+                    if(applies(p.rule,Scope.METADATA))head=replace(head,p,"raw","http/source",budget);
+                    if(applies(p.rule,Scope.BODY))body=replace(body,p,"raw","body/source",budget);
+                    changed=head+rendered.substring(boundary,boundary+separator)+body;
+                }else{Scope scope=doc.format==Documents.Format.HEADERS?Scope.METADATA:Scope.BODY;changed=applies(p.rule,scope)?replace(rendered,p,"raw","document",budget):rendered;}
+                if(!changed.equals(rendered)){doc=Documents.parse(new Documents.Input(input.name(),changed.getBytes(StandardCharsets.UTF_8),"; charset=UTF-8","",doc.format));values.clear();}
             }
         }
-        if(auto&&settings.email()){
-            Matcher m=EMAIL.matcher(value);while(m.find()){
-                limit(spans);
-                String email=m.group();String local=email.substring(0,email.indexOf('@'));
-                if(local.startsWith(".")||local.endsWith(".")||local.contains("..")||local.length()>64||email.length()>254)continue;
-                if(free(spans,m.start(),m.end()))spans.add(new Span(m.start(),m.end(),tag("EMAIL",email),"EMAIL",originalType,"email syntax",0));
-            }
-        }
-        if(auto&&settings.phone()){
-            Matcher m=PHONE.matcher(value);while(m.find()){
-                limit(spans);
-                String phone=m.group();boolean formatted=phone.contains("-")||phone.contains(" ")||phone.contains(".")||phone.startsWith("+82");
-                boolean context="PHONE".equals(Rules.FIELDS.get(Rules.key(field)))||Set.of("phoneno","telno","telnumber","mobilephone","mobilephonenumber","mobileno","mobilenumber","cellphone","cellphonenumber","contactphone","연락처","휴대전화").contains(Rules.key(field))||PHONE_CONTEXT.matcher(value.substring(Math.max(0,m.start()-32),m.start())).find();
-                // Unformatted 11-digit IDs are NOT enough. Numeric/key values are never inferred by shape alone.
-                if(!context&&!formatted)continue;
-                if(!context&&!field.isEmpty()&&Rules.key(field).matches(".*(id|code|no|number)$"))continue;
-                String normalized=mobile(phone);if(normalized==null||!free(spans,m.start(),m.end()))continue;
-                spans.add(new Span(m.start(),m.end(),tag("PHONE",normalized),"PHONE",originalType,context?"mobile pattern + phone context":"formatted KR mobile",0));
-            }
-        }
-        if(spans.isEmpty())return value;
-        spans.sort(Comparator.comparingInt(Span::start));StringBuilder out=new StringBuilder();int end=0;
-        for(Span span:spans){out.append(value,end,span.start).append(span.tag);end=span.end;
-            if(!span.type.equals("EXISTING")){hits++;Attribute a=attributes.computeIfAbsent(span.tag+"\0"+span.originalType+"\0"+span.rule,k->new Attribute(span));a.occurrences++;a.originalTypes.add(originalType);}
-        }
-        return out.append(value,end,value.length()).toString();
+        return new Result(original,doc.render(values),doc.format.name(),List.copyOf(doc.warnings),hits-before);
     }
-    private static boolean free(List<Span> spans,int start,int end){for(Span s:spans)if(start<s.end&&end>s.start)return false;return true;}
-    private void limit(List<Span> spans){check();if(spans.size()>=2000||hits>=100000)throw new IllegalArgumentException("FILTER_MATCH_LIMIT");}
-    private String tag(String type,String identity){return identities.computeIfAbsent(type+"\0"+identity,k->{String tag;do{tag="§"+type+"_"+sequence.merge(type,1,Integer::sum)+"§";}while(reserved.contains(tag));reserved.add(tag);generated.add(tag);return tag;});}
-    private static String mobile(String value){try{var util=PhoneNumberUtil.getInstance();var n=util.parse(value,"KR");if(!util.isValidNumber(n)||util.getNumberType(n)!=PhoneNumberUtil.PhoneNumberType.MOBILE)return null;return util.format(n,PhoneNumberUtil.PhoneNumberFormat.E164);}catch(Exception ex){return null;}}
-    public void writeAttributes(Path directory)throws java.io.IOException{
-        Documents.JSON.writerWithDefaultPrettyPrinter().writeValue(directory.resolve("filter_attributes.json").toFile(),Map.of("schema",2,"scope","Only phone, email and explicit literal rules; not complete anonymization","matches",hits,"attributes",attributes()));
+    private static boolean applies(Rule rule,Scope scope){return rule.scope()==Scope.ALL||rule.scope()==scope;}
+    public String metadata(String value){check();reserve(value);for(Prepared p:prepared)if(applies(p.rule,Scope.METADATA)&&p.mime==null&&p.field==null)value=replace(value,p,"string","metadata",new RegexBudget(cancelled));return value;}
+    public String filename(String value){String out=metadata(value).replaceAll("[<>:\"/\\\\|?*\\p{Cntrl}]","_").replaceAll("[. ]+$","");return out.isBlank()?"item":out;}
+    public Path path(Path path){Path out=Path.of("");int index=0;for(Path segment:path){String value=segment.toString();Matcher port=Pattern.compile("^(.*)(_\\d+)$").matcher(value);if(index++==0&&port.matches())value=filename(port.group(1))+port.group(2);else value=filename(value);out=out.resolve(value);}return out;}
+    private final class Snapshot {
+        final Set<String> oldReserved=new HashSet<>(reserved),oldGenerated=new HashSet<>(generated);
+        final Map<String,String> oldIdentities=new HashMap<>(identities);final Map<String,Integer> oldSequence=new HashMap<>(sequence);
+        final Map<String,Map<String,Object>> oldAttributes=new LinkedHashMap<>();final int oldHits=hits,oldLocations=locations.size();
+        Snapshot(){attributes.forEach((k,v)->oldAttributes.put(k,new LinkedHashMap<>(v)));}
+        void restore(){reserved.clear();reserved.addAll(oldReserved);generated.clear();generated.addAll(oldGenerated);identities.clear();identities.putAll(oldIdentities);sequence.clear();sequence.putAll(oldSequence);attributes.clear();attributes.putAll(oldAttributes);hits=oldHits;locations.subList(oldLocations,locations.size()).clear();}
     }
+    private void reserve(String value){Matcher m=TAG.matcher(value);while(m.find()){if(generated.contains(m.group()))throw new IllegalArgumentException("Input collides with a generated tag; not saved");reserved.add(m.group());}}
+    private String replace(String value,Prepared p,String type,String context,RegexBudget budget){
+        List<int[]> protectedSpans=new ArrayList<>();Matcher tags=TAG.matcher(value);while(tags.find())protectedSpans.add(new int[]{tags.start(),tags.end()});
+        Matcher matcher=p.pattern.matcher(budget.wrap(value));StringBuilder out=new StringBuilder();int cursor=0;
+        try{while(matcher.find()){
+            check();int start=matcher.start(p.rule.group()),end=matcher.end(p.rule.group());if(start<cursor||end<=start)continue;
+            // Binary search avoids a match-count x tag-count scan on already filtered files.
+            int low=0,high=protectedSpans.size();while(low<high){int mid=(low+high)>>>1;if(protectedSpans.get(mid)[1]<=start)low=mid+1;else high=mid;}
+            if(low<protectedSpans.size()&&protectedSpans.get(low)[0]<end)continue;
+            String found=value.substring(start,end);if(p.exclude!=null&&p.exclude.matcher(budget.wrap(found)).find())continue;
+            if(hits>=100_000)throw new IllegalArgumentException("Match limit exceeded");
+            String tag=p.rule.numbered()?numbered(p.rule.tag(),found):p.rule.tag();out.append(value,cursor,start).append(tag);cursor=end;hits++;
+            locations.add(new Hit(p.rule.id(),p.rule.name(),tag,start,end,context));
+            String key=p.rule.id()+"\0"+tag+"\0"+type;
+            Map<String,Object> row=attributes.computeIfAbsent(key,k->{Map<String,Object> a=new LinkedHashMap<>();a.put("tag",tag);a.put("type",p.rule.category());a.put("originalType",type);a.put("ruleId",p.rule.id());a.put("rule",p.index);a.put("occurrences",0);return a;});row.put("occurrences",(int)row.get("occurrences")+1);
+        }}catch(StackOverflowError e){throw new IllegalArgumentException("Regex recursion limit exceeded; simplify the pattern");}
+        return cursor==0?value:out.append(value,cursor,value.length()).toString();
+    }
+    private String numbered(String base,String value){return identities.computeIfAbsent(base+"\0"+value,k->{String tag,name=base.substring(1,base.length()-1);do{tag="§"+name+"_"+sequence.merge(base,1,Integer::sum)+"§";}while(reserved.contains(tag));reserved.add(tag);generated.add(tag);return tag;});}
+    public void writeAttributes(Path directory)throws java.io.IOException{Documents.JSON.writerWithDefaultPrettyPrinter().writeValue(directory.resolve("filter_attributes.json").toFile(),Map.of("schema",3,"scope","User-selected rules only; not complete anonymization","matches",hits,"attributes",attributes()));}
 }

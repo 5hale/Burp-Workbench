@@ -16,7 +16,7 @@ import java.util.Objects;
 final class RuleStore {
     static final String STATE_KEY = "burpworkbench.replace.v1.state";
     static final String BACKUP_KEY = "burpworkbench.replace.v1.backup";
-    static final int SCHEMA_VERSION = 1;
+    static final int SCHEMA_VERSION = 2;
     static final int MAX_RULES = 10_000;
     static final int MAX_FIELD_CHARS = 1_048_576;
     static final int MAX_PAYLOAD_BYTES = 16 * 1024 * 1024;
@@ -116,7 +116,7 @@ final class RuleStore {
         if (state.rules().size() > MAX_RULES) throw invalid("Too many stored rules.");
         long size = 4L + 4L + 1L + 4L;
         for (RuleDraft rule : state.rules()) {
-            size += 2L;
+            size += 3L;
             for (String value : fields(rule)) {
                 if (value.length() > MAX_FIELD_CHARS) throw invalid("A rule field is too long to store.");
                 size += 4L + 2L * value.length();
@@ -134,6 +134,7 @@ final class RuleStore {
                 output.writeBoolean(rule.enabled());
                 for (String field : fields(rule)) writeString(output, field);
                 output.writeBoolean(rule.regex());
+                output.writeBoolean(rule.caseSensitive());
             }
             output.flush();
             return Base64.getEncoder().encodeToString(bytes.toByteArray());
@@ -155,7 +156,7 @@ final class RuleStore {
             DataInputStream input = new DataInputStream(new ByteArrayInputStream(bytes));
             if (input.readInt() != MAGIC) throw invalid("Stored rules have an invalid format marker.");
             int version = input.readInt();
-            if (version != SCHEMA_VERSION) {
+            if (version != 1 && version != SCHEMA_VERSION) {
                 throw new StoreException(Failure.UNSUPPORTED_VERSION, "Unsupported project rule schema: " + version);
             }
             boolean enabled = readBoolean(input);
@@ -171,7 +172,8 @@ final class RuleStore {
                 String match = readString(input);
                 String replacement = readString(input);
                 boolean regex = readBoolean(input);
-                rules.add(new RuleDraft(ruleEnabled, name, target, url, path, match, replacement, regex));
+                boolean caseSensitive = version >= 2 && readBoolean(input);
+                rules.add(new RuleDraft(ruleEnabled, name, target, url, path, match, replacement, regex, caseSensitive));
             }
             if (input.available() != 0) throw invalid("Stored rules have unexpected trailing data.");
             return new State(rules, enabled);

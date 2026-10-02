@@ -9,6 +9,9 @@ final class CompareItem {
         this.id = id; bytes = input.bytes().clone(); kind = input.kind(); source = input.source();
         request=input.request();
     }
+    CompareItem workingCopy(byte[] content) {
+        return new CompareItem(id,new MessageCapture(content,kind,source,request));
+    }
     long retainedBytes(){return (long)bytes.length+(request==null?0:request.length());}
     @Override public String toString() {
         String label = source.length() > 95 ? source.substring(0, 95) + "…" : source;
