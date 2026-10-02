@@ -28,7 +28,24 @@ public final class ExtractorModule implements WorkbenchModule {
             throw new IllegalStateException("Extractor module is already initialized");
         }
 
-        ExtractorContextMenuProvider provider = new ExtractorContextMenuProvider(context.api());
+        com.burpworkbench.modules.extractor.filter.RulesPanel[] holder = new com.burpworkbench.modules.extractor.filter.RulesPanel[1];
+        Runnable create = () -> {
+            holder[0] = new com.burpworkbench.modules.extractor.filter.RulesPanel(context.api());
+            lifetime.onClose(() -> {
+                if(javax.swing.SwingUtilities.isEventDispatchThread())holder[0].close();
+                else try{javax.swing.SwingUtilities.invokeAndWait(holder[0]::close);}
+                catch(InterruptedException e){Thread.currentThread().interrupt();javax.swing.SwingUtilities.invokeLater(holder[0]::close);}
+                catch(java.lang.reflect.InvocationTargetException e){throw new IllegalStateException(e.getCause());}
+            });
+            context.api().userInterface().applyThemeToComponent(holder[0]);
+            holder[0].applyFont();
+            lifetime.own(context.api().userInterface().registerSuiteTab("Extractor", holder[0]));
+        };
+        if (javax.swing.SwingUtilities.isEventDispatchThread()) create.run();
+        else try { javax.swing.SwingUtilities.invokeAndWait(create); }
+        catch (InterruptedException e) { Thread.currentThread().interrupt(); throw new IllegalStateException(e); }
+        catch (java.lang.reflect.InvocationTargetException e) { throw new IllegalStateException(e.getCause()); }
+        ExtractorContextMenuProvider provider = new ExtractorContextMenuProvider(context.api(), holder[0]::snapshot);
         activeProvider = provider;
         try {
             Registration registration =

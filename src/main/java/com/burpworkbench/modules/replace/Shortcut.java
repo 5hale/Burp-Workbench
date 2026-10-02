@@ -9,7 +9,7 @@ record Shortcut(String value) {
     }
 
     static Shortcut defaultShortcut() {
-        return new Shortcut("Ctrl+Shift+9");
+        return new Shortcut("Ctrl+Shift+Q");
     }
 
     static Shortcut fromKeyEvent(KeyEvent event) {

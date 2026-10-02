@@ -11,11 +11,13 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Consumer;
+import static com.burpworkbench.platform.TableMenus.*;
 
 /** Inline rule editor backed by persisted rules and the shared traffic transformation engine. */
 final class ReplacePanel extends JPanel {
     private final RuleList rules;
-    private final List<String> samples = new ArrayList<>();
+    private final List<byte[]> samples = new ArrayList<>();
+    private final List<String> sampleUrls = new ArrayList<>();
     private final RuleTable model;
     private final JTable table;
     private final JComboBox<String> target = new JComboBox<>(RuleTypes.labels());
@@ -27,19 +29,19 @@ final class ReplacePanel extends JPanel {
     private final Consumer<Boolean> onEnabledChanged;
     private final JCheckBox enabled = new JCheckBox("Enabled");
     private final javax.swing.Timer samplePoll;
+    private final com.burpworkbench.platform.LatestWork previewWork = new com.burpworkbench.platform.LatestWork("replace-preview");
+    private boolean previewPending;
     private final JLabel status = new JLabel("Proxy traffic"), storageState = new JLabel();
-    private final JLabel hotkeyStatus = new JLabel("Hotkey callback 0 · tab focus 0");
     private final JLabel previewStatus = new JLabel();
     private final JScrollPane listScroll;
-    private final JSplitPane split;
+    private final ProportionalSplitPane split;
     private final JPanel center = new JPanel(new BorderLayout());
     private JSplitPane previewSplit;
     private ResizableTextEditor matchEditor, replacementEditor;
     private JButton detailsToggle;
-    private double listWidthFraction = 0.6;
+    private double listWidthFraction = 0.5;
     private int[] columnWidths;
     private boolean loading, closed;
-    private int callbacks, focused;
     private int displayedRow = -1;
 
     ReplacePanel(List<RuleDraft> initial, boolean enabled, PreviewEditor sample, PreviewEditor result,
@@ -59,16 +61,20 @@ final class ReplacePanel extends JPanel {
             }
         });
         setBorder(new EmptyBorder(8, 10, 6, 10));
-        for (int i = 0; i < rules.size(); i++) samples.add(sampleFor(rules.get(i).target()));
+        for (int i = 0; i < rules.size(); i++) { samples.add(sampleFor(rules.get(i).target())); sampleUrls.add(""); }
         configureNames();
         configureTable();
+        install(table,
+                entry("Add",()->!closed,this::add),
+                entry("Copy",()->!closed&&table.getSelectedRow()>=0,this::copy),
+                entry("Remove",()->!closed&&table.getSelectedRow()>=0,this::removeSelected),
+                entry("Up",()->!closed&&table.getSelectedRow()>0,()->move(-1)),
+                entry("Down",()->!closed&&table.getSelectedRow()>=0&&table.getSelectedRow()<table.getRowCount()-1,()->move(1)));
         listScroll = new JScrollPane(table);
         listScroll.setColumnHeaderView(table.getTableHeader());
         listScroll.setMinimumSize(new Dimension(300, 200));
-        split = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, listScroll, details());
-        split.setResizeWeight(0.6);
-        split.setContinuousLayout(true);
-        split.setDividerLocation(0.6);
+        split = new ProportionalSplitPane(listScroll, details());
+        split.setName("rules.split");
         add(toolbar(openHotkeys), BorderLayout.NORTH);
         center.add(split, BorderLayout.CENTER);
         add(center, BorderLayout.CENTER);
@@ -132,8 +138,7 @@ final class ReplacePanel extends JPanel {
             toggle.setText("Hide details");
         } else {
             if (split.getWidth() > 0 && split.getDividerLocation() > 0) {
-                listWidthFraction = Math.max(0.2, Math.min(0.85,
-                        (double) split.getDividerLocation() / split.getWidth()));
+                listWidthFraction = split.dividerFraction();
             }
             columnWidths = new int[table.getColumnCount()];
             for (int i = 0; i < columnWidths.length; i++) {
@@ -154,9 +159,6 @@ final class ReplacePanel extends JPanel {
         JPanel messages = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
         messages.add(status); messages.add(storageState);
         footer.add(messages, BorderLayout.CENTER);
-        JPanel right = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 0));
-        right.add(hotkeyStatus);
-        footer.add(right, BorderLayout.EAST);
         return footer;
     }
 
@@ -200,12 +202,13 @@ final class ReplacePanel extends JPanel {
         previewActions.add(test);
         previewBar.add(previewActions, BorderLayout.EAST);
         previewBody.add(previewBar, BorderLayout.NORTH);
-        previewSplit = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT,
-                labeled("Original sample", sample.component()), labeled("Modified sample", result.component()));
+        JPanel original = labeled("Original sample", sample.component());
+        JPanel modified = labeled("Modified sample", result.component());
+        // Native editor toolbars can advertise different minimum/preferred widths.
+        original.setMinimumSize(new Dimension(0, 0));
+        modified.setMinimumSize(new Dimension(0, 0));
+        previewSplit = new ProportionalSplitPane(original, modified);
         previewSplit.setName("preview.split");
-        previewSplit.setResizeWeight(0.5);
-        previewSplit.setContinuousLayout(true);
-        previewSplit.setDividerLocation(0.5);
         previewBody.add(new ResizablePreview(previewSplit), BorderLayout.CENTER);
         previewBody.add(previewStatus, BorderLayout.SOUTH);
         CollapsibleSection previewSection = new CollapsibleSection("Test preview", previewBody, true);
@@ -262,6 +265,7 @@ final class ReplacePanel extends JPanel {
             if (row < 0 || row >= rules.size()) {
                 comment.setText(""); url.setText(""); path.setText("");
                 match.setText(""); replacement.setText(""); sample.setMessage(false, "");
+                sample.setSourceUrl(""); result.setSourceUrl("");
                 regex.setSelected(false);
                 setEditorEnabled(false);
             } else {
@@ -271,7 +275,9 @@ final class ReplacePanel extends JPanel {
                 comment.setText(item.name()); url.setText(item.url()); path.setText(item.path());
                 match.setText(item.match()); replacement.setText(item.replacement());
                 regex.setSelected(item.regex());
-                sample.setMessage(isRequest(item.target()), samples.get(row));
+                sample.setBytes(isRequest(item.target()), samples.get(row));
+                String source = sampleUrls.get(row);
+                sample.setSourceUrl(source); result.setSourceUrl(source);
                 match.setCaretPosition(0); replacement.setCaretPosition(0);
                 sample.setCaretPosition(0);
             }
@@ -294,12 +300,12 @@ final class ReplacePanel extends JPanel {
         String selectedTarget = (String) target.getSelectedItem();
         if (selectedTarget == null) return;
         captureSample();
-        if (samples.get(row).equals(sampleFor(oldTarget))) {
-            String generated = sampleFor(selectedTarget);
+        if (java.util.Arrays.equals(samples.get(row), sampleFor(oldTarget))) {
+            byte[] generated = sampleFor(selectedTarget);
             samples.set(row, generated);
         }
         loading = true;
-        try { sample.setMessage(isRequest(selectedTarget), samples.get(row)); } finally { loading = false; }
+        try { sample.setBytes(isRequest(selectedTarget), samples.get(row)); } finally { loading = false; }
         commitRule();
     }
 
@@ -324,6 +330,8 @@ final class ReplacePanel extends JPanel {
     }
 
     private void invalidatePreview() {
+        previewWork.cancel();
+        previewPending = false;
         int row = selected();
         boolean hasRule = row >= 0 && row < rules.size();
         result.setMessage(hasRule && isRequest(rules.get(row).target()), "");
@@ -345,19 +353,26 @@ final class ReplacePanel extends JPanel {
         captureSample(); displayedRow = -1;
         RuleDraft fresh = new RuleDraft(false, "New rule", "Response body", "", "", "", "", false);
         samples.add(sampleFor(fresh.target()));
+        sampleUrls.add("");
         selectAfterMutation(rules.add(fresh));
         SwingUtilities.invokeLater(() -> { comment.requestFocusInWindow(); comment.selectAll(); });
     }
 
     void addFromScope(String origin, String requestPath) {
+        addFromScope(origin, requestPath, false, null, "");
+    }
+
+    void addFromScope(String origin, String requestPath, boolean response, byte[] message, String issue) {
         if (closed) return;
         captureSample(); displayedRow = -1;
-        RuleDraft fresh = new RuleDraft(false, "New rule", "Request header", origin,
+        RuleDraft fresh = new RuleDraft(false, "New rule", response ? "Response header" : "Request header", origin,
                 ScopeMatcher.literalPath(requestPath), "", "", false);
-        samples.add(sampleFor(fresh.target()));
+        samples.add(message != null ? message.clone() : issue.isEmpty() ? sampleFor(fresh.target()) : new byte[0]);
+        sampleUrls.add(message == null ? "" : origin + requestPath);
         selectAfterMutation(rules.add(fresh));
         if (split.getParent() == null) toggleDetails(detailsToggle);
         status.setText("URL / Path imported into a new rule");
+        showPreviewIssue(issue);
         SwingUtilities.invokeLater(() -> { comment.requestFocusInWindow(); comment.selectAll(); });
     }
 
@@ -371,6 +386,7 @@ final class ReplacePanel extends JPanel {
         int row = selected(); if (closed || row < 0) return;
         captureSample(); displayedRow = -1;
         samples.add(row + 1, samples.get(row));
+        sampleUrls.add(row + 1, sampleUrls.get(row));
         selectAfterMutation(rules.duplicate(row));
     }
 
@@ -379,6 +395,7 @@ final class ReplacePanel extends JPanel {
         captureSample(); displayedRow = -1;
         rules.remove(row);
         samples.remove(row);
+        sampleUrls.remove(row);
         selectAfterMutation(Math.min(row, rules.size() - 1));
     }
 
@@ -388,8 +405,9 @@ final class ReplacePanel extends JPanel {
         int moved = rules.move(row, direction);
         if (moved != row) {
             displayedRow = -1;
-            String localSample = samples.remove(row);
+            byte[] localSample = samples.remove(row);
             samples.add(moved, localSample);
+            sampleUrls.add(moved, sampleUrls.remove(row));
             selectAfterMutation(moved);
         }
     }
@@ -403,10 +421,11 @@ final class ReplacePanel extends JPanel {
 
     private void resetSample() {
         int row = selected(); if (closed || row < 0) return;
-        String generated = sampleFor(rules.get(row).target());
+        byte[] generated = sampleFor(rules.get(row).target());
         samples.set(row, generated);
+        sampleUrls.set(row, ""); sample.setSourceUrl(""); result.setSourceUrl("");
         loading = true;
-        try { sample.setMessage(isRequest(rules.get(row).target()), generated); } finally { loading = false; }
+        try { sample.setBytes(isRequest(rules.get(row).target()), generated); } finally { loading = false; }
         invalidatePreview();
     }
 
@@ -414,20 +433,38 @@ final class ReplacePanel extends JPanel {
         int row = selected(); if (closed || row < 0) return;
         try {
             captureSample();
-            boolean request = isRequest(rules.get(row).target());
-            TrafficEngine.Result applied = TrafficEngine.preview(rules.get(row), request,
-                    samples.get(row).getBytes(StandardCharsets.UTF_8));
-            result.setMessage(request, new String(applied.message(), StandardCharsets.UTF_8));
-            result.setCaretPosition(0);
-            showPreviewIssue(String.join("; ", applied.issues()));
+            RuleDraft rule = rules.get(row);
+            boolean request = isRequest(rule.target());
+            byte[] input = samples.get(row).clone();
+            invalidatePreview();
+            previewPending = true;
+            previewWork.submit(() -> TrafficEngine.preview(rule, request, input), applied -> {
+                previewPending = false;
+                // Native editors are polled; catch edits made since the last poll too.
+                if (captureSample()) { invalidatePreview(); return; }
+                result.setBytes(request, applied.message());
+                result.setCaretPosition(0);
+                showPreviewIssue(String.join("; ", applied.issues()));
+            }, error -> {
+                previewPending = false;
+                if (captureSample()) { invalidatePreview(); return; }
+                showPreviewIssue("미리보기 실패: " + (error.getMessage() == null
+                        ? error.getClass().getSimpleName() : error.getMessage()));
+            });
         } catch (RuntimeException error) {
+            previewWork.cancel();
+            previewPending = false;
             result.setMessage(isRequest(rules.get(row).target()), "");
             showPreviewIssue("미리보기 실패: " + (error.getMessage() == null
                     ? error.getClass().getSimpleName() : error.getMessage()));
         }
     }
 
-    private static String sampleFor(String selectedTarget) {
+    private static byte[] sampleFor(String selectedTarget) {
+        return sampleText(selectedTarget).getBytes(StandardCharsets.UTF_8);
+    }
+
+    private static String sampleText(String selectedTarget) {
         if (selectedTarget.equals("Request param name") || selectedTarget.equals("Request param value")) {
             return "POST /api/profile?name=old&name=keep HTTP/1.1\nHost: example.test\n"
                     + "Content-Type: application/x-www-form-urlencoded\n\n"
@@ -445,8 +482,8 @@ final class ReplacePanel extends JPanel {
 
     private boolean captureSample() {
         if (loading || closed || displayedRow < 0 || displayedRow >= samples.size() || !sample.isModified()) return false;
-        String current = sample.text();
-        if (current.equals(samples.get(displayedRow))) return false;
+        byte[] current = sample.bytes();
+        if (java.util.Arrays.equals(current, samples.get(displayedRow))) return false;
         samples.set(displayedRow, current);
         return true;
     }
@@ -455,22 +492,20 @@ final class ReplacePanel extends JPanel {
         if (captureSample()) invalidatePreview();
     }
 
+    boolean previewPending() { return previewPending; }
+
     void storageStatus(String message) { if (!closed) storageState.setText(message); }
 
     /** Called when the extension unloads or the module shuts down. */
     void closeDialogs() {
         if (closed) return;
         closed = true;
+        previewWork.close();
+        previewPending = false;
         samplePoll.stop();
         sample.close(); result.close();
     }
 
-    void hotkeyReceived(boolean focusedTab) {
-        if (closed) return;
-        callbacks++;
-        if (focusedTab) focused++;
-        hotkeyStatus.setText("Hotkey callback " + callbacks + " · tab focus " + focused);
-    }
 
     int ruleCount() { return rules.size(); }
     RuleDraft ruleAt(int index) { return rules.get(index); }

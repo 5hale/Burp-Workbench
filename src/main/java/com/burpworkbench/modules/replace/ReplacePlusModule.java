@@ -10,6 +10,7 @@ public final class ReplacePlusModule implements WorkbenchModule {
 
     @Override public void initialize(ModuleContext context, ModuleLifetime lifetime) {
         ReplaceRuntime runtime = lifetime.own(new ReplaceRuntime(context.api()));
+        lifetime.own(context.menus().register(com.burpworkbench.platform.WorkbenchMenus.Command.REPLACE,runtime::fromMenu));
         try {
             runtime.start();
         } catch (RuntimeException | LinkageError failure) {

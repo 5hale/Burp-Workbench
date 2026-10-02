@@ -26,20 +26,42 @@ final class ProxyTrafficHandler implements ProxyRequestHandler, ProxyResponseHan
     private static final long DIAGNOSTIC_INTERVAL_NANOS = 5_000_000_000L;
     private static final long SCOPE_PREFLIGHT_NANOS = 250_000_000L;
     private final Supplier<RuleStore.State> states;
+    private final Supplier<ForwardSession.State> forwards;
     private final Consumer<String> diagnostics;
     private final Adapter adapter;
     private final LongSupplier clock;
     private final AtomicLong lastDiagnostic = new AtomicLong(Long.MIN_VALUE);
     private final AtomicLong suppressedDiagnostics = new AtomicLong();
     private volatile boolean closed;
+    private final java.util.LinkedHashMap<Integer, OriginalScope> originalScopes = new java.util.LinkedHashMap<>();
+    private record OriginalScope(String url,long captured) {}
+    private synchronized void remember(int id,String url) {
+        if(closed)return;
+        if(originalScopes.size()>=2048)originalScopes.remove(originalScopes.keySet().iterator().next());
+        originalScopes.put(id,new OriginalScope(url,clock.getAsLong()));
+    }
+    private synchronized String takeOriginal(int id) {
+        OriginalScope scope=originalScopes.remove(id);
+        return scope==null||clock.getAsLong()-scope.captured()>300_000_000_000L?null:scope.url();
+    }
 
     ProxyTrafficHandler(Supplier<RuleStore.State> states, Consumer<String> diagnostics) {
         this(states, diagnostics, new NativeAdapter(), System::nanoTime);
     }
 
+    ProxyTrafficHandler(Supplier<RuleStore.State> states, Supplier<ForwardSession.State> forwards, Consumer<String> diagnostics) {
+        this(states, forwards, diagnostics, new NativeAdapter(), System::nanoTime);
+    }
+
     ProxyTrafficHandler(Supplier<RuleStore.State> states, Consumer<String> diagnostics,
                         Adapter adapter, LongSupplier clock) {
+        this(states, ForwardSession.State::empty, diagnostics, adapter, clock);
+    }
+
+    ProxyTrafficHandler(Supplier<RuleStore.State> states, Supplier<ForwardSession.State> forwards, Consumer<String> diagnostics,
+                        Adapter adapter, LongSupplier clock) {
         this.states = Objects.requireNonNull(states);
+        this.forwards = Objects.requireNonNull(forwards);
         this.diagnostics = Objects.requireNonNull(diagnostics);
         this.adapter = Objects.requireNonNull(adapter);
         this.clock = Objects.requireNonNull(clock);
@@ -59,8 +81,14 @@ final class ProxyTrafficHandler implements ProxyRequestHandler, ProxyResponseHan
         if (!closed) {
             try {
                 RuleStore.State state = states.get();
+                ForwardSession.State forward = forwards.get();
+                // Read original URL before Replace can rewrite the request line or Host.
+                String originalUrl = hasRules(state, true) || forward.enabled() && !forward.rules().isEmpty()
+                        ? scopeUrl(request::url, true) : "";
+                ForwardEngine.Destination destination = ForwardEngine.select(forward, originalUrl,
+                        issue -> report(true, issue, 1));
                 if (hasRules(state, true)) {
-                    String requestUrl = scopeUrl(request::url, true);
+                    String requestUrl = originalUrl;
                     byte[] bytes = scopeEligible(state, requestUrl, true) && !closed
                             ? boundedBytes(request.toByteArray(), true) : null;
                     if (bytes != null && !closed) {
@@ -70,6 +98,18 @@ final class ProxyTrafficHandler implements ProxyRequestHandler, ProxyResponseHan
                             HttpRequest changed = adapter.request(request.httpService(), result.message());
                             if (!closed) output = Objects.requireNonNull(changed);
                         }
+                    }
+                }
+                if(destination != null && !closed) {
+                    try {
+                        HttpRequest forwarded = adapter.forward(output, destination);
+                        if(!closed) {
+                            remember(request.messageId(),originalUrl);
+                            output = Objects.requireNonNull(forwarded);
+                        }
+                    } catch(RuntimeException invalid) {
+                        // Preserve a successful Replace result; never commit a partial destination/Host change.
+                        report(true, "FORWARD_FAILED", 1);
                     }
                 }
             } catch (RuntimeException failure) {
@@ -86,8 +126,9 @@ final class ProxyTrafficHandler implements ProxyRequestHandler, ProxyResponseHan
         if (!closed) {
             try {
                 RuleStore.State state = states.get();
+                String original = originalScope(response);
                 if (hasRules(state, false)) {
-                    String requestUrl = scopeUrl(() -> response.initiatingRequest().url(), false);
+                    String requestUrl = original != null ? original : scopeUrl(() -> response.initiatingRequest().url(), false);
                     byte[] bytes = scopeEligible(state, requestUrl, false) && !closed
                             ? boundedBytes(response.toByteArray(), false) : null;
                     if (bytes != null && !closed) {
@@ -105,6 +146,11 @@ final class ProxyTrafficHandler implements ProxyRequestHandler, ProxyResponseHan
             }
         }
         return adapter.sentResponse(output, annotations);
+    }
+
+    private synchronized String originalScope(InterceptedResponse response) {
+        if(originalScopes.isEmpty())return null;
+        return takeOriginal(response.messageId());
     }
 
     private static boolean hasRules(RuleStore.State state, boolean request) {
@@ -197,11 +243,15 @@ final class ProxyTrafficHandler implements ProxyRequestHandler, ProxyResponseHan
         }
     }
 
-    @Override public void close() {
+    @Override public synchronized void close() {
         closed = true;
+        originalScopes.clear();
     }
 
     interface Adapter {
+        default HttpRequest forward(HttpRequest request, ForwardEngine.Destination destination) {
+            return ForwardEngine.apply(request,destination);
+        }
         HttpRequest request(HttpService service, byte[] bytes);
         HttpResponse response(byte[] bytes);
         ProxyRequestReceivedAction receivedRequest(HttpRequest request, Annotations annotations);

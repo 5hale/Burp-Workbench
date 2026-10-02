@@ -9,7 +9,7 @@ import java.awt.event.MouseEvent;
 /** Resizes its own editor; siblings keep their heights and the outer pane scrolls. */
 final class ResizableTextEditor extends JPanel {
     private final JScrollPane scroll;
-    private int editorHeight = 150;
+    private int editorHeight = 70;
 
     ResizableTextEditor(String title, String name, JTextComponent editor) {
         super(new BorderLayout(0, 4));

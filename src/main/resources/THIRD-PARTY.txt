@@ -1,0 +1,11 @@
+Burp Workbench 0.5.0
+Montoya API: provided by Burp, not bundled.
+Jackson 2.18.11 and libphonenumber 9.0.40: Apache-2.0; licenses/Apache-2.0.txt.
+jsoup 1.23.2: MIT; META-INF/jsoup/LICENSE from the dependency JAR.
+Brotli Java decoder 0.1.2: MIT; licenses/Brotli-MIT.txt.
+Rhino 1.8.0: Mozilla Public License 2.0; licenses/MPL-2.0.txt.
+License obtained from https://www.mozilla.org/MPL/2.0/index.txt on 2026-10-01.
+Rhino source: https://github.com/mozilla/rhino/releases/tag/Rhino1_8_0_Release
+js-beautify: product-vendored version; vendor/js-beautify/LICENSE (MIT).
+
+Filtering uses no external service.

@@ -24,11 +24,18 @@ final class RuleStore {
     private static final int MAGIC = 0x42575250; // BWRP
 
     private final PersistedObject data;
+    private final String stateKey, backupKey;
+    private final State defaults;
     private boolean loaded;
     private String loadedRaw;
 
     RuleStore(PersistedObject data) {
+        this(data, STATE_KEY, BACKUP_KEY, new State(DefaultRules.rules(), true));
+    }
+
+    RuleStore(PersistedObject data, String stateKey, String backupKey, State defaults) {
         this.data = Objects.requireNonNull(data, "Project extension data");
+        this.stateKey = stateKey; this.backupKey = backupKey; this.defaults = defaults;
     }
 
     record State(List<RuleDraft> rules, boolean enabled) {
@@ -65,7 +72,7 @@ final class RuleStore {
     synchronized State load() {
         loaded = false;
         String raw = readCurrent();
-        State state = raw == null ? new State(DefaultRules.rules(), true) : decode(raw);
+        State state = raw == null ? defaults : decode(raw);
         loadedRaw = raw;
         loaded = true;
         return state;
@@ -86,8 +93,8 @@ final class RuleStore {
         }
         if (Objects.equals(current, encoded)) return;
         try {
-            if (current != null) data.setString(BACKUP_KEY, current);
-            data.setString(STATE_KEY, encoded);
+            if (current != null) data.setString(backupKey, current);
+            data.setString(stateKey, encoded);
         } catch (RuntimeException failure) {
             // A failed API call may have partially completed; require a fresh load before another write.
             loaded = false;
@@ -98,7 +105,7 @@ final class RuleStore {
 
     private String readCurrent() {
         try {
-            return data.getString(STATE_KEY);
+            return data.getString(stateKey);
         } catch (RuntimeException failure) {
             loaded = false;
             throw new StoreException(Failure.READ, "Project rules could not be read.", failure);

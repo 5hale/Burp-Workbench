@@ -59,11 +59,9 @@ final class ProxyTabMount {
 
     boolean install(Component root, JPanel panel) {
         requireEdt();
-        if (owned != null) { log.accept("ALREADY_INSTALLED"); return verify(); }
+        if (owned != null) return verify();
         Discovery result = discover(root);
         if (result.truncated() || result.candidates().size() != 1) {
-            log.accept("NOT_INSERTED candidates=" + result.candidates().size()
-                    + " truncated=" + result.truncated() + " visited=" + result.visited());
             return false;
         }
         JTabbedPane candidate = result.candidates().get(0);
@@ -90,11 +88,6 @@ final class ProxyTabMount {
             if (!verify()) throw new IllegalStateException("Existing tabs changed during insertion");
             candidate.revalidate();
             candidate.repaint();
-            log.accept("INSERTED rightOf=Match_and_replace index=" + candidate.indexOfComponent(panel)
-                    + " matchIndex=" + candidate.indexOfComponent(matchComponent)
-                    + " originalTabs=" + originals.size() + " currentTabs=" + candidate.getTabCount()
-                    + " selectionPreserved=" + (candidate.getSelectedComponent() == selected)
-                    + " host=" + candidate.getClass().getName());
             return true;
         } catch (RuntimeException failure) {
             remove();
@@ -108,7 +101,6 @@ final class ProxyTabMount {
         int ownIndex = host.indexOfComponent(owned);
         boolean intact = ownIndex >= 0 && host.indexOfComponent(matchComponent) == ownIndex - 1
                 && host.getTabCount() == originals.size() + 1 && originalsIntact();
-        log.accept("CHECK intact=" + intact + " replaceIndex=" + ownIndex);
         return intact;
     }
 
@@ -151,8 +143,7 @@ final class ProxyTabMount {
                 // Remove only the exact component owned by this module, never by title/index alone.
                 previousHost.removeTabAt(previousHost.indexOfComponent(previousPanel));
             }
-            log.accept("REMOVED originalTabsIntact=" + originalsIntact()
-                    + " remainingTabs=" + previousHost.getTabCount());
+            if (!originalsIntact()) log.accept("REMOVE_WARNING original_tabs_changed");
             previousHost.revalidate();
             previousHost.repaint();
         } finally {

@@ -36,6 +36,7 @@ final class ExportService {
     private final BodyBeautifier bodyBeautifier;
     private final long beautifyMemoryBudget;
     private final MontoyaApi api;
+    private final FilterHook filter;
 
     public ExportService(MontoyaApi api) {
         this(api, Long.getLong(
@@ -45,7 +46,12 @@ final class ExportService {
     }
 
     ExportService(MontoyaApi api, long beautifyMemoryBudget) {
+        this(api, beautifyMemoryBudget, null);
+    }
+
+    ExportService(MontoyaApi api, long beautifyMemoryBudget, FilterHook filter) {
         this.api = api;
+        this.filter = filter;
         this.pathMapper = new UrlPathMapper();
         this.bodyDecoder = new ResponseBodyDecoder();
         this.indexWriter = new ExportIndexWriter();
@@ -133,7 +139,7 @@ final class ExportService {
                         checkCancelled(listener);
 
                         HttpRequestResponse item = items.get(itemIndex);
-                        String currentUrl = safeUrl(item);
+                        String currentUrl = filter == null ? safeUrl(item) : "item " + (itemIndex + 1);
                         try {
                             processOne(
                                     item,
@@ -186,7 +192,7 @@ final class ExportService {
             if (terminalFailure instanceof OutOfMemoryError) {
                 summary.incrementFailed(null);
             } else {
-                summary.incrementFailed("run failed: " + messageOf(terminalFailure));
+                summary.incrementFailed("run failed: " + message(terminalFailure));
             }
             addTerminalDiagnostic(summary, phase, "fatal", processed, total, terminalFailure);
             logFatalDiagnostic(summary, terminalFailure);
@@ -208,6 +214,7 @@ final class ExportService {
                 throwFailure(fatalFailure);
             }
             phase = "summary";
+            if (filter != null) filter.writeAttributes(runDirectory);
             writeSummary(runDirectory, summary);
             return summary;
         } finally {
@@ -236,6 +243,7 @@ final class ExportService {
 
         if (!hasUsableResponse(item)) {
             Path relativePath = pathMapper.map(method, url);
+            if (filter != null) { relativePath = filter.path(relativePath); url = filter.metadata(url); method = filter.metadata(method); }
             ExportCandidate candidate = new ExportCandidate(
                     method,
                     url,
@@ -271,8 +279,10 @@ final class ExportService {
         );
 
         checkCancelled(listener);
+        if (filter != null && response.body().length() > com.burpworkbench.modules.extractor.filter.Documents.MAX_BYTES)
+            throw new IOException("FILTER_INPUT_LIMIT");
         byte[] rawBody = response.body().getBytes();
-        FileDecodeResult decodedBody = bodyDecoder.decodeToTempFile(
+        FileDecodeResult decodedBody = filter != null ? filter.body(rawBody, contentType, contentEncoding, runDirectory) : bodyDecoder.decodeToTempFile(
                 rawBody,
                 contentEncoding,
                 runDirectory,
@@ -282,6 +292,14 @@ final class ExportService {
         try {
             rawBody = null;
             checkCancelled(listener);
+            if (filter != null) {
+                requestedRelativePath = filter.path(requestedRelativePath);
+                url = filter.metadata(url);
+                method = filter.metadata(method);
+                contentType = filter.metadata(contentType.split(";", 2)[0]) + "; charset=UTF-8";
+                contentEncoding = filter.metadata(contentEncoding);
+                contentDisposition = filter.metadata(contentDisposition);
+            }
             ExportCandidate candidate = new ExportCandidate(
                     method,
                     url,
@@ -608,6 +626,9 @@ final class ExportService {
     }
 
     private ExportCandidate failureCandidate(HttpRequestResponse item, int itemIndex) {
+        if (filter != null) return new ExportCandidate("", "filtered-item-" + (itemIndex + 1),
+                safeHasResponse(item), safeStatusCode(item), "", "", "", Path.of("failed-" + (itemIndex + 1)),
+                MimeCategory.from("", Path.of("failed")), false, "filter/export failed; original not saved", "", 0, 0);
         String method = safeMethod(item);
         String url = safeUrl(item);
         int status = safeStatusCode(item);
@@ -843,7 +864,7 @@ final class ExportService {
                 logging.logToError(
                         "Extractor " + summary.terminalDiagnostic()
                                 + " error=" + primaryFailure.getClass().getName()
-                                + " message=" + messageOf(primaryFailure)
+                                + " message=" + message(primaryFailure)
                 );
             }
         } catch (Throwable loggingFailure) {
@@ -896,7 +917,7 @@ final class ExportService {
     }
 
     private String message(Throwable throwable) {
-        return messageOf(throwable);
+        return filter == null ? messageOf(throwable) : "filter/export failed; original not saved (" + throwable.getClass().getSimpleName() + ")";
     }
 
     private static String messageOf(Throwable throwable) {

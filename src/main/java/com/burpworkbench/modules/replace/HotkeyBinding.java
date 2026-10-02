@@ -2,6 +2,10 @@ package com.burpworkbench.modules.replace;
 
 import burp.api.montoya.core.Registration;
 import burp.api.montoya.ui.hotkey.HotKeyEvent;
+import com.burpworkbench.platform.WorkbenchKeys;
+import java.awt.Component;
+import java.awt.event.InputEvent;
+import java.awt.event.KeyEvent;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -24,6 +28,22 @@ final class HotkeyBinding implements AutoCloseable {
     private volatile boolean closed;
     private Registration active;
     private Shortcut current;
+    private final WorkbenchKeys.Delivery delivery=new WorkbenchKeys.Delivery();
+
+    synchronized boolean matches(KeyEvent event) {
+        if(closed||current==null)return false;
+        try{return current.equals(Shortcut.fromKeyEvent(event));}catch(IllegalArgumentException ignored){return false;}
+    }
+    void fromWorkbench(KeyEvent event,Component focus) {
+        Object token;synchronized(this){if(!matches(event))return;token=activeToken;}
+        deliver(token,event,ScopeCapture.fromWorkbench(focus,log));
+    }
+    private void deliver(Object token,InputEvent event,ScopeCapture captured) {
+        synchronized(this){if(closed||activeToken!=token||captured==null||!delivery.claim(event))return;}
+        dispatch.accept(()->{
+            if(!closed&&activeToken==token)action.accept(captured);
+        });
+    }
 
     HotkeyBinding(Registrar registrar, Runnable action, Consumer<String> log) {
         this(registrar, action, log, Runnable::run);
@@ -55,13 +75,13 @@ final class HotkeyBinding implements AutoCloseable {
         try {
             candidate = registrar.register(shortcut, event -> {
                 boolean accepted = !closed && activeToken == token;
-                if (!closed) log.accept("HOTKEY_CALLBACK received=true active=" + accepted);
                 if (!accepted) return;
-                ScopeCapture captured = ScopeCapture.from(event, log);
-                dispatch.accept(() -> {
-                    if (!closed && activeToken == token) action.accept(captured);
-                    else if (!closed) log.accept("HOTKEY_DISPATCH_SKIPPED stale_registration=true");
-                });
+                InputEvent input=null;
+                try{if(event!=null)input=event.inputEvent();}catch(RuntimeException ignored){}
+                Component focus=WorkbenchKeys.context(input);
+                if(WorkbenchKeys.capturingShortcut(focus)||(input!=null&&WorkbenchKeys.capturingShortcut(input.getComponent())))return;
+                ScopeCapture captured=WorkbenchKeys.surface(focus)?ScopeCapture.fromWorkbench(focus,log):ScopeCapture.from(event,log);
+                deliver(token,input,captured);
             });
             if (candidate == null) {
                 log.accept("HOTKEY_REGISTER_FAILED key=" + shortcut.value() + " reason=null_registration");
@@ -84,8 +104,8 @@ final class HotkeyBinding implements AutoCloseable {
         active = candidate;
         current = shortcut;
         activeToken = token;
+        delivery.reset();
         retire(previous);
-        log.accept("HOTKEY_REGISTERED key=" + shortcut.value() + " context=ANY_SUPPORTED pending=" + pending.size());
         return new Result(true, "Assigned " + shortcut.value() + pendingSuffix());
     }
 
@@ -97,7 +117,6 @@ final class HotkeyBinding implements AutoCloseable {
         active = null;
         current = null;
         retire(previous);
-        log.accept("HOTKEY_CLEARED pending=" + pending.size());
         return new Result(true, "Shortcut disabled" + pendingSuffix());
     }
 
@@ -121,7 +140,6 @@ final class HotkeyBinding implements AutoCloseable {
         current = null;
         retryPending();
         retire(previous);
-        log.accept("HOTKEY_CLOSED pending=" + pending.size());
     }
 
     private void retryPending() {
@@ -135,7 +153,6 @@ final class HotkeyBinding implements AutoCloseable {
         if (registration == null) return;
         try {
             registration.deregister();
-            log.accept("HOTKEY_UNREGISTERED pending=" + pending.size());
         } catch (RuntimeException error) {
             pending.add(registration);
             log.accept("HOTKEY_UNREGISTER_FAILED type=" + error.getClass().getName()

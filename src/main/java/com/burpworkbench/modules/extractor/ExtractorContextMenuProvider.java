@@ -33,18 +33,24 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
-final class ExtractorContextMenuProvider implements ContextMenuItemsProvider, AutoCloseable {
+public final class ExtractorContextMenuProvider implements ContextMenuItemsProvider, AutoCloseable {
     private static final long CLOSE_AWAIT_MILLIS = 5_000;
 
     private final MontoyaApi api;
     private final ExportService exportService;
+    private final java.util.function.Supplier<com.burpworkbench.modules.extractor.filter.FilterSettings> rules;
     private final Set<ActiveExport> activeExports = ConcurrentHashMap.newKeySet();
     private final Set<JDialog> selectionDialogs = ConcurrentHashMap.newKeySet();
     private volatile boolean closed;
 
     public ExtractorContextMenuProvider(MontoyaApi api) {
+        this(api, com.burpworkbench.modules.extractor.filter.FilterSettings::defaults);
+    }
+
+    public ExtractorContextMenuProvider(MontoyaApi api, java.util.function.Supplier<com.burpworkbench.modules.extractor.filter.FilterSettings> rules) {
         this.api = api;
         this.exportService = new ExportService(api);
+        this.rules = rules;
     }
 
     @Override
@@ -119,50 +125,24 @@ final class ExtractorContextMenuProvider implements ContextMenuItemsProvider, Au
         if (closed) {
             return null;
         }
-        JFileChooser chooser = new JFileChooser();
-        chooser.setDialogTitle("Choose Extractor output folder");
-        chooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
-        chooser.setAcceptAllFileFilterUsed(false);
-        chooser.setControlButtonsAreShown(false);
-
-        JCheckBox beautify = new JCheckBox("Beautify", true);
-        beautify.setToolTipText("Beautify JS and JSON responses before saving.");
-
-        JPanel optionPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
-        optionPanel.setBorder(BorderFactory.createEmptyBorder(7, 10, 10, 10));
-        optionPanel.add(beautify);
-
-        JButton saveButton = new JButton("Save");
-        JButton cancelButton = new JButton("Cancel");
-        JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 0));
-        buttonPanel.setBorder(BorderFactory.createEmptyBorder(7, 10, 10, 10));
-        buttonPanel.add(saveButton);
-        buttonPanel.add(cancelButton);
-
-        JPanel bottomPanel = new JPanel(new BorderLayout());
-        bottomPanel.add(optionPanel, BorderLayout.WEST);
-        bottomPanel.add(buttonPanel, BorderLayout.EAST);
-
+        ExportChooserPanel panel = new ExportChooserPanel(rules);
         JDialog dialog = new JDialog((Frame) null, "Choose Extractor output folder", true);
         dialog.setDefaultCloseOperation(WindowConstants.DISPOSE_ON_CLOSE);
-        dialog.getContentPane().setLayout(new BorderLayout());
-        dialog.getContentPane().add(chooser, BorderLayout.CENTER);
-        dialog.getContentPane().add(bottomPanel, BorderLayout.SOUTH);
+        dialog.setContentPane(panel);
 
         final ExportRequest[] request = new ExportRequest[1];
-        saveButton.addActionListener(event -> {
-            File selected = chooser.getSelectedFile();
-            if (selected == null) {
-                selected = chooser.getCurrentDirectory();
-            }
-            if (selected != null) {
-                ExportOptions options = ExportOptions.defaults().withBeautify(beautify.isSelected());
-                request[0] = new ExportRequest(selected.toPath(), options);
+        panel.save.addActionListener(event -> {
+            try {
+                ExportChooserPanel.Choice choice = panel.choice();
+                if (choice != null) request[0] = new ExportRequest(choice.root(), choice.options(), choice.filterSettings());
+            } catch (IllegalArgumentException invalidRules) {
+                JOptionPane.showMessageDialog(dialog, invalidRules.getMessage(), "Filter rules", JOptionPane.WARNING_MESSAGE);
+                return;
             }
             dialog.dispose();
         });
-        cancelButton.addActionListener(event -> dialog.dispose());
-        dialog.getRootPane().setDefaultButton(saveButton);
+        panel.cancel.addActionListener(event -> dialog.dispose());
+        dialog.getRootPane().setDefaultButton(panel.save);
         dialog.pack();
         dialog.setLocationRelativeTo(null);
         selectionDialogs.add(dialog);
@@ -183,7 +163,7 @@ final class ExtractorContextMenuProvider implements ContextMenuItemsProvider, Au
     private boolean runExport(List<HttpRequestResponse> selectedItems, boolean includeSubtree, ExportRequest request) {
         return startExport(
                 request,
-                progressListener -> exportMenuSelection(
+                progressListener -> serviceFor(request.filterSettings(), progressListener).export(
                         selectedItems,
                         includeSubtree,
                         request.outputRoot(),
@@ -196,8 +176,9 @@ final class ExtractorContextMenuProvider implements ContextMenuItemsProvider, Au
     private boolean runResolvedExport(List<HttpRequestResponse> selectedItems, ExportRequest request) {
         return startExport(
                 request,
-                progressListener -> exportSearchPlusSelection(
+                progressListener -> serviceFor(request.filterSettings(), progressListener).exportResolved(
                         selectedItems,
+                        selectedItems.size(),
                         request.outputRoot(),
                         request.options(),
                         progressListener
@@ -219,6 +200,11 @@ final class ExtractorContextMenuProvider implements ContextMenuItemsProvider, Au
                 options,
                 progressListener
         );
+    }
+
+    ExportService serviceFor(com.burpworkbench.modules.extractor.filter.FilterSettings settings, ExportProgressListener progress) {
+        return settings == null ? exportService : new ExportService(api, 8L * 1024 * 1024,
+                new FilterHook(new com.burpworkbench.modules.extractor.filter.FilterSession(settings, progress::isCancelled)));
     }
 
     ExportSummary exportSearchPlusSelection(
@@ -404,7 +390,7 @@ final class ExtractorContextMenuProvider implements ContextMenuItemsProvider, Au
         }
     }
 
-    private record ExportRequest(Path outputRoot, ExportOptions options) {
+    private record ExportRequest(Path outputRoot, ExportOptions options, com.burpworkbench.modules.extractor.filter.FilterSettings filterSettings) {
     }
 
     @FunctionalInterface

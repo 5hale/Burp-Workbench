@@ -43,6 +43,10 @@ public final class RequestResponseDetailDialog extends JDialog {
         this.currentIndex = Math.max(0, Math.min(selectedIndex, this.requestResponses.size() - 1));
         this.requestEditor = api.userInterface().createHttpRequestEditor(EditorOptions.READ_ONLY);
         this.responseEditor = api.userInterface().createHttpResponseEditor(EditorOptions.READ_ONLY);
+        com.burpworkbench.platform.WorkbenchInput.bindNative(requestEditor,
+                ()->requestEditor.getRequest()==null?null:requestEditor.getRequest().toByteArray(),"Request",requestEditor::getRequest);
+        com.burpworkbench.platform.WorkbenchInput.bindNative(responseEditor,
+                ()->responseEditor.getResponse()==null?null:responseEditor.getResponse().toByteArray(),"Response",requestEditor::getRequest);
 
         setDefaultCloseOperation(DISPOSE_ON_CLOSE);
         setLayout(new BorderLayout(8, 8));

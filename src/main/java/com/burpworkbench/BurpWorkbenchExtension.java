@@ -3,6 +3,8 @@ package com.burpworkbench;
 import burp.api.montoya.BurpExtension;
 import burp.api.montoya.MontoyaApi;
 import com.burpworkbench.modules.extractor.ExtractorModule;
+import com.burpworkbench.modules.compare.ComparePlusModule;
+import com.burpworkbench.modules.decoder.DecoderPlusModule;
 import com.burpworkbench.modules.replace.ReplacePlusModule;
 import com.burpworkbench.modules.search.SearchPlusModule;
 import com.burpworkbench.platform.ModuleRegistry;
@@ -18,8 +20,10 @@ public final class BurpWorkbenchExtension implements BurpExtension {
         newRegistry.register(extractor);
         newRegistry.register(new SearchPlusModule(extractor.extractionHandler()));
         newRegistry.register(new ReplacePlusModule());
+        newRegistry.register(new ComparePlusModule());
+        newRegistry.register(new DecoderPlusModule());
         registry = newRegistry;
         newRegistry.start();
-        api.logging().logToOutput("Burp Workbench loaded. Modules: Extractor, Search++, Replace++.");
+        api.logging().logToOutput("Burp Workbench loaded. Modules: Extractor, Search++, Replace++, Compare++, Decoder++.");
     }
 }

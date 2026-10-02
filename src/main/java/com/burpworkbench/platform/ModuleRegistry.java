@@ -13,6 +13,7 @@ public final class ModuleRegistry implements AutoCloseable {
     private final List<StartedModule> startedModules = new ArrayList<>();
     private State state = State.NEW;
     private Registration unloadingRegistration;
+    private final WorkbenchMenus menus=new WorkbenchMenus();
 
     public ModuleRegistry(MontoyaApi api) {
         this.api = Objects.requireNonNull(api, "api");
@@ -30,9 +31,10 @@ public final class ModuleRegistry implements AutoCloseable {
             throw new IllegalStateException("Module registry has already been started or closed");
         }
         state = State.STARTING;
-        ModuleContext context = new ModuleContext(api);
+        ModuleContext context = new ModuleContext(api,menus);
 
         try {
+            menus.install();
             for (WorkbenchModule module : modules) {
                 String moduleName = module.name();
                 ModuleLifetime lifetime = new ModuleLifetime(moduleName);
@@ -53,6 +55,7 @@ public final class ModuleRegistry implements AutoCloseable {
             state = State.STARTED;
         } catch (RuntimeException | Error failure) {
             rollbackStartedModules(failure);
+            menus.close();
             state = State.CLOSED;
             modules.clear();
             throw failure;
@@ -76,6 +79,7 @@ public final class ModuleRegistry implements AutoCloseable {
         }
         startedModules.clear();
         modules.clear();
+        menus.close();
 
         Registration registration = unloadingRegistration;
         unloadingRegistration = null;

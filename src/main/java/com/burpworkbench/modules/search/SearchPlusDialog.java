@@ -132,6 +132,7 @@ final class SearchPlusDialog extends JFrame {
     private final JLabel countLabel = new JLabel("0 results");
     private final HttpRequestEditor requestEditor;
     private final HttpResponseEditor responseEditor;
+    private boolean previewCaptureReady;
     private final Timer filterDebounceTimer;
     private final JPanel responseHolder = new JPanel(new BorderLayout());
     private final ExecutorService searchExecutor = Executors.newSingleThreadExecutor(runnable -> {
@@ -204,6 +205,10 @@ final class SearchPlusDialog extends JFrame {
         );
         this.requestEditor = api.userInterface().createHttpRequestEditor(EditorOptions.READ_ONLY);
         this.responseEditor = api.userInterface().createHttpResponseEditor(EditorOptions.READ_ONLY);
+        com.burpworkbench.platform.WorkbenchInput.bindNative(requestEditor,
+                () -> previewRequest()==null?null:requestEditor.getRequest().toByteArray(),"Request",this::previewRequest);
+        com.burpworkbench.platform.WorkbenchInput.bindNative(responseEditor,
+                () -> previewRequest()==null||selectedResult().exchange().requestResponse().response()==null?null:responseEditor.getResponse().toByteArray(),"Response",this::previewRequest);
         this.filterDebounceTimer = new Timer(
                 FILTER_DEBOUNCE_MILLIS,
                 event -> flushScheduledFilterRefresh()
@@ -1233,6 +1238,8 @@ final class SearchPlusDialog extends JFrame {
             }
         });
         table.setComponentPopupMenu(contextMenu());
+        com.burpworkbench.platform.WorkbenchInput.bindFull(table,this::captureSelectedRequest);
+        com.burpworkbench.platform.WorkbenchInput.bind(table,selectedOnly->selectedOnly?null:captureSelectedRequest());
         table.getColumnModel().getColumn(0).setPreferredWidth(80);
         table.getColumnModel().getColumn(1).setPreferredWidth(160);
         table.getColumnModel().getColumn(2).setPreferredWidth(70);
@@ -1241,6 +1248,14 @@ final class SearchPlusDialog extends JFrame {
         table.getColumnModel().getColumn(5).setPreferredWidth(90);
         table.getColumnModel().getColumn(6).setPreferredWidth(80);
         table.getColumnModel().getColumn(7).setPreferredWidth(150);
+    }
+
+    private com.burpworkbench.platform.WorkbenchInput.Value captureSelectedRequest(){
+        if(shutdownRequested.get())return null;
+        SearchResult selected=selectedResult();if(selected==null)return null;
+        var request=selected.exchange().requestResponse().request();if(request==null)return null;
+        var bytes=request.toByteArray();com.burpworkbench.platform.WorkbenchInput.check(bytes.length());
+        return new com.burpworkbench.platform.WorkbenchInput.Value(bytes.getBytes(),"Request","Search result",request.url(),request);
     }
 
     private JPopupMenu contextMenu() {
@@ -2104,7 +2119,13 @@ final class SearchPlusDialog extends JFrame {
         }
     }
 
+    private burp.api.montoya.http.message.requests.HttpRequest previewRequest(){
+        if(!previewCaptureReady||shutdownRequested.get())return null;
+        SearchResult result=selectedResult();return result==null?null:result.exchange().requestResponse().request();
+    }
+
     private void updatePreview() {
+        previewCaptureReady=false;
         SearchResult result = selectedResult();
         if (result == null) {
             clearPreview();
@@ -2125,12 +2146,14 @@ final class SearchPlusDialog extends JFrame {
             }
             responseHolder.revalidate();
             responseHolder.repaint();
+            previewCaptureReady=true;
         } catch (RuntimeException exception) {
             clearPreview();
         }
     }
 
     private void clearPreview() {
+        previewCaptureReady=false;
         applyPreviewSearchExpression();
         responseHolder.removeAll();
         responseHolder.add(new JLabel("No response selected."), BorderLayout.CENTER);
@@ -2407,6 +2430,8 @@ final class SearchPlusDialog extends JFrame {
     }
 
     private void clearUiReferencesAfterShutdown() {
+        com.burpworkbench.platform.WorkbenchInput.bind(requestEditor.uiComponent(),null);
+        com.burpworkbench.platform.WorkbenchInput.bind(responseEditor.uiComponent(),null);
         for (SearchPlusTabState state : tabStates) {
             state.visibleResults.clearView();
             state.allResults.clear();

@@ -34,6 +34,7 @@ final class BurpPreviewEditor implements PreviewEditor {
     private boolean request = true;
     private boolean enabled = true;
     private boolean closed;
+    private String sourceUrl = "";
 
     BurpPreviewEditor(UserInterface ui, boolean readOnly) {
         this(ui.createHttpRequestEditor(options(readOnly)), ui.createHttpResponseEditor(options(readOnly)),
@@ -50,7 +51,24 @@ final class BurpPreviewEditor implements PreviewEditor {
         this.responseFactory = Objects.requireNonNull(responseFactory);
         component.add(requestEditor.uiComponent(), REQUEST);
         component.add(responseEditor.uiComponent(), RESPONSE);
+        com.burpworkbench.platform.WorkbenchInput.bindNative(requestEditor,
+                ()->closed||!this.request||requestEditor.getRequest()==null?null:requestEditor.getRequest().toByteArray(),"Request",
+                ()->closed||!this.request?null:requestEditor.getRequest());
+        com.burpworkbench.platform.WorkbenchInput.bindNative(responseEditor,
+                ()->closed||this.request||responseEditor.getResponse()==null?null:responseEditor.getResponse().toByteArray(),"Response",()->null);
+        com.burpworkbench.platform.WorkbenchInput.bindFull(requestEditor.uiComponent(),()->fullCapture(true));
+        com.burpworkbench.platform.WorkbenchInput.bindFull(responseEditor.uiComponent(),()->fullCapture(false));
         cards.show(component, REQUEST);
+    }
+
+    @Override public void setSourceUrl(String url) { sourceUrl=Objects.requireNonNullElse(url, ""); }
+    private com.burpworkbench.platform.WorkbenchInput.Value fullCapture(boolean requestSide) {
+        if(closed||requestSide!=request)return null;
+        ByteArray original=request ? requestEditor.getRequest()==null?null:requestEditor.getRequest().toByteArray()
+                : responseEditor.getResponse()==null?null:responseEditor.getResponse().toByteArray();
+        if(original==null)return null;
+        com.burpworkbench.platform.WorkbenchInput.check(original.length());byte[] data=original.getBytes();
+        return new com.burpworkbench.platform.WorkbenchInput.Value(data,request?"Request":"Response","Replace preview",sourceUrl,null);
     }
 
     private static EditorOptions[] options(boolean readOnly) {
@@ -60,8 +78,11 @@ final class BurpPreviewEditor implements PreviewEditor {
     @Override public JComponent component() { return component; }
 
     @Override public void setMessage(boolean request, String text) {
+        setBytes(request, Objects.requireNonNullElse(text, "").getBytes(StandardCharsets.UTF_8));
+    }
+
+    @Override public void setBytes(boolean request, byte[] bytes) {
         if (closed) return;
-        byte[] bytes = Objects.requireNonNullElse(text, "").getBytes(StandardCharsets.UTF_8);
         if (request) requestEditor.setRequest(requestFactory.apply(bytes));
         else responseEditor.setResponse(responseFactory.apply(bytes));
         this.request = request;
@@ -70,18 +91,22 @@ final class BurpPreviewEditor implements PreviewEditor {
     }
 
     @Override public String text() {
-        if (closed) return "";
+        return new String(bytes(), StandardCharsets.UTF_8);
+    }
+
+    @Override public byte[] bytes() {
+        if (closed) return new byte[0];
         ByteArray bytes;
         if (request) {
             HttpRequest message = requestEditor.getRequest();
-            if (message == null) return "";
+            if (message == null) return new byte[0];
             bytes = message.toByteArray();
         } else {
             HttpResponse message = responseEditor.getResponse();
-            if (message == null) return "";
+            if (message == null) return new byte[0];
             bytes = message.toByteArray();
         }
-        return bytes == null ? "" : new String(bytes.getBytes(), StandardCharsets.UTF_8);
+        return bytes == null ? new byte[0] : bytes.getBytes();
     }
 
     @Override public boolean isModified() { return !closed && active().isModified(); }
@@ -113,6 +138,8 @@ final class BurpPreviewEditor implements PreviewEditor {
     @Override public void close() {
         if (closed) return;
         closed = true;
+        com.burpworkbench.platform.WorkbenchInput.bind(requestEditor.uiComponent(),null);
+        com.burpworkbench.platform.WorkbenchInput.bind(responseEditor.uiComponent(),null);
         // Native editors have no public dispose method and this adapter registers no listeners.
         component.removeAll();
         enabledStates.clear();

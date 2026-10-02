@@ -53,9 +53,11 @@ final class TrafficEngine {
         if (message.length > MAX_WIRE_BYTES) return new Result(message, 0, List.of("Message exceeds 8 MiB; unchanged"));
         List<String> issues = new ArrayList<>();
         byte[] current = message;
+        Message parsed = null;
         int count = 0, applicable = 0;
         long deadline = clock.getAsLong() + MESSAGE_NANOS;
         for (int index = 0; index < rules.size(); index++) {
+            if (Thread.currentThread().isInterrupted()) throw new java.util.concurrent.CancellationException();
             // Scanning excluded rules still consumes the aggregate time budget.
             if (clock.getAsLong() - deadline >= 0) {
                 issues.add("Remaining rules skipped: 1-second message limit");
@@ -72,9 +74,14 @@ final class TrafficEngine {
                 applicable++;
                 long ruleDeadline = Math.min(deadline, clock.getAsLong() + RULE_NANOS);
                 Replacement replacement = new Replacement(rule, ruleDeadline, clock);
-                Change change = apply(current, request, rule, replacement);
+                if (parsed == null) parsed = Message.parse(current, request);
+                Change change = apply(parsed, rule, replacement);
+                // Even header-only changes invalidate charset/encoding/body caches.
+                if (change.bytes() != current) parsed = null;
                 current = change.bytes();
                 count = Math.addExact(count, change.count());
+            } catch (java.util.concurrent.CancellationException cancelled) {
+                throw cancelled;
             } catch (RuntimeException | IOException | StackOverflowError invalid) {
                 // A bad rule never commits its partially changed request/body.
                 if (issues.size() < 20) issues.add("Rule " + (index + 1) + ": " + shortMessage(invalid));
@@ -95,8 +102,8 @@ final class TrafficEngine {
         return message.length() > 180 ? message.substring(0, 180) : message;
     }
 
-    private static Change apply(byte[] input, boolean request, RuleDraft rule, Replacement replacement) throws IOException {
-        Message message = Message.parse(input, request);
+    private static Change apply(Message message, RuleDraft rule, Replacement replacement) throws IOException {
+        byte[] input = message.raw;
         String type = rule.target();
         if (type.equals(RuleTypes.REQUEST_FIRST_LINE)) {
             TextChange changed = replacement.apply(message.firstLine);
@@ -114,9 +121,9 @@ final class TrafficEngine {
         if (!(type.equals(RuleTypes.REQUEST_BODY) || type.equals(RuleTypes.RESPONSE_BODY))) {
             throw new IllegalArgumentException("Unknown rule type");
         }
-        DecodedBody decoded = decodeBody(message, replacement);
+        DecodedBody decoded = message.decodedBody(replacement);
         Charset charset = bodyCharset(message);
-        String text = decode(decoded.bytes(), charset);
+        String text = message.bodyText(decoded, charset);
         rejectBinaryText(message, text);
         TextChange changed = replacement.apply(text);
         if (text.equals(changed.text())) return new Change(input, changed.count());
@@ -140,8 +147,8 @@ final class TrafficEngine {
         String contentType = message.header("Content-Type");
         if (contentType.split(";", 2)[0].trim().equalsIgnoreCase("application/x-www-form-urlencoded")) {
             if (!bodyCharset(message).equals(StandardCharsets.UTF_8)) throw new IllegalArgumentException("Form parameters require UTF-8 charset");
-            DecodedBody decoded = decodeBody(message, replacement);
-            String body = decode(decoded.bytes(), StandardCharsets.UTF_8);
+            DecodedBody decoded = message.decodedBody(replacement);
+            String body = message.bodyText(decoded, StandardCharsets.UTF_8);
             TextChange change = parameterFields(body, rule, replacement);
             count += change.count();
             if (!change.text().equals(body)) {
@@ -346,6 +353,23 @@ final class TrafficEngine {
         final int bodyOffset;
         final String firstLine, headers, newline;
         final Charset headerCharset;
+        private DecodedBody decodedBody;
+        private String bodyText;
+        private Charset textCharset;
+
+        DecodedBody decodedBody(Replacement replacement) throws IOException {
+            replacement.check();
+            if (decodedBody == null) decodedBody = decodeBody(this, replacement);
+            return decodedBody;
+        }
+
+        String bodyText(DecodedBody body, Charset charset) {
+            if (bodyText == null || !charset.equals(textCharset)) {
+                String decoded = decode(body.bytes(), charset);
+                bodyText = decoded; textCharset = charset;
+            }
+            return bodyText;
+        }
 
         private Message(byte[] raw, int bodyOffset, String firstLine, String headers, String newline, Charset headerCharset) {
             this.raw = raw; this.bodyOffset = bodyOffset; this.firstLine = firstLine;
@@ -440,16 +464,20 @@ final class TrafficEngine {
             pattern = rule.regex() ? Pattern.compile(rule.match()) : null;
         }
 
-        void check() { if (clock.getAsLong() - deadline >= 0) throw new IllegalArgumentException("Rule processing timeout (250 ms / 1 second message)"); }
+        void check() {
+            if (Thread.currentThread().isInterrupted()) throw new java.util.concurrent.CancellationException();
+            if (clock.getAsLong() - deadline >= 0) throw new IllegalArgumentException("Rule processing timeout (250 ms / 1 second message)");
+        }
 
         TextChange apply(String text) {
             check();
             if (pattern == null) return literal(text);
             Matcher matcher = pattern.matcher(new TimedSequence(text, this));
+            if (!matcher.find()) { check(); return new TextChange(text, 0); }
             StringBuilder output = new StringBuilder(Math.min(text.length(), 64 * 1024));
             long references = rule.replacement().chars().filter(ch -> ch == '$').count();
             int count = 0, cursor = 0;
-            while (matcher.find()) {
+            do {
                 check();
                 int largest = matcher.end() - matcher.start();
                 if (references > 0) for (int group = 1; group <= matcher.groupCount(); group++) {
@@ -459,7 +487,7 @@ final class TrafficEngine {
                 checkSize((long) output.length() + matcher.start() - cursor + rule.replacement().length() + references * largest, MAX_TEXT_BYTES);
                 matcher.appendReplacement(output, rule.replacement());
                 cursor = matcher.end(); count++;
-            }
+            } while (matcher.find());
             checkSize((long) output.length() + text.length() - cursor, MAX_TEXT_BYTES);
             matcher.appendTail(output);
             check();
@@ -468,6 +496,7 @@ final class TrafficEngine {
 
         private TextChange literal(String text) {
             int cursor = 0, count = 0, next;
+            if (text.indexOf(rule.match()) < 0) { check(); return new TextChange(text, 0); }
             StringBuilder output = new StringBuilder(Math.min(text.length(), 64 * 1024));
             while ((next = text.indexOf(rule.match(), cursor)) >= 0) {
                 check();
